@@ -1,0 +1,7 @@
+{
+  "value": [
+    {"service": "Exchange Online", "status": "serviceOperational", "id": "Exchange"},
+    {"service": "Microsoft Teams", "status": "serviceDegradation", "id": "microsoftteams"},
+    {"service": "SharePoint Online", "status": "serviceOperational", "id": "SharePoint"}
+  ]
+}

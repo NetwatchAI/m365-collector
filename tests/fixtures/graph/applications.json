@@ -1,0 +1,22 @@
+{
+  "value": [
+    {
+      "id": "bbbbbbbb-0000-4000-8000-000000000001",
+      "appId": "cccccccc-0000-4000-8000-000000000001",
+      "displayName": "Payroll Connector",
+      "passwordCredentials": [
+        {"keyId": "dddddddd-0000-4000-8000-000000000001", "displayName": "prod", "endDateTime": "2026-11-01T00:00:00Z"}
+      ],
+      "keyCredentials": [
+        {"keyId": "dddddddd-0000-4000-8000-000000000002", "type": "AsymmetricX509Cert", "usage": "Verify", "endDateTime": "2027-03-15T10:00:00Z"}
+      ]
+    },
+    {
+      "id": "bbbbbbbb-0000-4000-8000-000000000002",
+      "appId": "cccccccc-0000-4000-8000-000000000002",
+      "displayName": "No Credentials App",
+      "passwordCredentials": [],
+      "keyCredentials": []
+    }
+  ]
+}
