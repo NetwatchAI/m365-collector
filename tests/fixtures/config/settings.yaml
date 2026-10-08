@@ -1,0 +1,7 @@
+# Offline fixture configuration (fake IDs only).
+app:
+  client_id: 00000000-0000-0000-0000-000000000000
+secrets:
+  cert: file:/nonexistent/m365c_cert   # unused with --fixtures
+http:
+  max_retries: 1

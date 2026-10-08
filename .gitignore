@@ -1,0 +1,27 @@
+# Real configuration (only the examples are committed)
+config/*.yaml
+!config/*.example.yaml
+
+# Secrets and key material
+/secrets/
+deploy/secrets/*
+!deploy/secrets/README.md
+*.pem
+*.pfx
+*.key
+.env
+
+# Snapshot cache persistence
+cache/
+.m365c-cache/
+
+# Python / tooling
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+dist/
+build/
+*.egg-info/

@@ -1,0 +1,16 @@
+.git
+.venv
+.mypy_cache
+.ruff_cache
+.pytest_cache
+**/__pycache__
+cache/
+.m365c-cache/
+secrets/
+deploy/
+config/*.yaml
+!config/*.example.yaml
+*.pem
+*.pfx
+*.key
+.env

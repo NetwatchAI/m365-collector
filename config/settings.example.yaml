@@ -1,0 +1,33 @@
+# Copy to settings.yaml. Every value can be overridden with an M365C_ environment
+# variable, using "__" for nesting, e.g. M365C_HTTP__MAX_CONCURRENCY=10.
+app:
+  # The Netwatch multi-tenant app registration (Application (client) ID).
+  client_id: 00000000-0000-0000-0000-000000000000
+
+secrets:
+  # PEM with private key + certificate (or PKCS#12). Backends:
+  #   file:/run/secrets/m365c_cert
+  #   vault:secret/m365c/cert#pem                          (pip extra [vault])
+  #   keyvault:https://<kv>.vault.azure.net/<secret-name>  (pip extra [azure])
+  cert: file:/run/secrets/m365c_cert
+  # cert_password: file:/run/secrets/m365c_cert_password  # only for encrypted keys / PFX
+
+http:
+  max_concurrency: 20         # concurrent Graph requests, all tenants
+  per_tenant_concurrency: 4   # concurrent Graph requests per tenant
+  timeout_s: 60
+  max_retries: 5
+
+server:
+  host: 0.0.0.0
+  port: 9365
+
+cache:
+  persist_dir: null           # e.g. /var/lib/m365c to keep snapshots across restarts
+
+# How often tenants.yaml and thresholds.yaml are checked for changes.
+reload_interval: 30s
+
+# Optional overrides of collector default intervals (30s, 5m, 12h, 1d).
+intervals:
+  mailbox: 12h

@@ -1,0 +1,9 @@
+defaults:
+  license_util_warn: 0.95
+  storage_used_warn: 0.90
+  inactive_days: 30
+  mail_sent_max_7d: 800
+  mail_received_max_7d: 800
+customers:
+  contoso:
+    storage_used_warn: 0.85

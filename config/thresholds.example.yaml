@@ -1,0 +1,11 @@
+# Copy to thresholds.yaml. Hot reloaded. Exposed as m365_threshold{check=...}
+# per tenant; the Prometheus alert rules join against it.
+defaults:
+  license_util_warn: 0.95     # consumed / total
+  storage_used_warn: 0.90     # mailbox and OneDrive used / quota
+  inactive_days: 30           # licensed, enabled user without sign-in
+  mail_sent_max_7d: 800
+  mail_received_max_7d: 800
+customers:
+  contoso:
+    storage_used_warn: 0.85
