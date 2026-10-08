@@ -1,0 +1,9 @@
+apiVersion: 1
+providers:
+  - name: m365c
+    folder: Microsoft 365
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards

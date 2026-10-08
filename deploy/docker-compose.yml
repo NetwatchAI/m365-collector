@@ -1,0 +1,124 @@
+# M365 monitoring stack: collector + Prometheus + Alertmanager + Grafana + Loki + Alloy.
+#
+# Secrets are files under deploy/secrets/ (git-ignored), mounted as Compose secrets.
+# Nothing secret is written inline here. See README "Deploy".
+name: m365c
+
+services:
+  collector:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: netwatch/m365c:latest
+    restart: unless-stopped
+    environment:
+      M365C_CONFIG_DIR: /etc/m365c
+      M365C_SECRETS__CERT: file:/run/secrets/m365c_cert
+      M365C_CACHE__PERSIST_DIR: /var/lib/m365c/cache
+    volumes:
+      - ../config:/etc/m365c:ro
+      - m365c-cache:/var/lib/m365c
+    secrets:
+      - source: m365c_cert
+        target: m365c_cert
+        mode: 0400
+        uid: "10001"
+    expose:
+      - "9365"
+    labels:
+      logs.netwatch/ship: "true"
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=90d
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      - collector
+      - alertmanager
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./alertmanager:/etc/alertmanager:ro
+      - alertmanager-data:/alertmanager
+    secrets:
+      - alertmanager_smtp_password
+      - alertmanager_webhook_contoso
+    ports:
+      - "127.0.0.1:9093:9093"
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    secrets:
+      - grafana_admin_password
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - prometheus
+      - loki
+
+  loki:
+    image: grafana/loki:3.5.3
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/config.yml"]
+    volumes:
+      - ./loki/config.yml:/etc/loki/config.yml:ro
+      - loki-data:/loki
+    expose:
+      - "3100"
+
+  alloy:
+    image: grafana/alloy:v1.10.0
+    restart: unless-stopped
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --storage.path=/var/lib/alloy/data
+      - --server.http.listen-addr=0.0.0.0:12345
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy/data
+    depends_on:
+      - loki
+
+secrets:
+  m365c_cert:
+    file: ./secrets/m365c_cert.pem
+  grafana_admin_password:
+    file: ./secrets/grafana_admin_password
+  alertmanager_smtp_password:
+    file: ./secrets/alertmanager_smtp_password
+  alertmanager_webhook_contoso:
+    file: ./secrets/alertmanager_webhook_contoso
+
+volumes:
+  m365c-cache:
+  prometheus-data:
+  alertmanager-data:
+  grafana-data:
+  loki-data:
+  alloy-data:

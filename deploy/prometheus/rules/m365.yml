@@ -1,0 +1,172 @@
+# Alert rules for m365c. Thresholds come from the collector as
+# m365_threshold{customer,tenant,check} and are joined with on(customer, tenant).
+# Every alert carries `customer` and `tenant`.
+groups:
+  - name: m365-licenses
+    rules:
+      - alert: M365LicenseNearlyExhausted
+        expr: |
+          (m365_license_consumed / (m365_license_total > 0))
+            > on(customer, tenant) group_left
+          m365_threshold{check="license_util_warn"}
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.customer }}: licence {{ $labels.sku }} is {{ $value | humanizePercentage }} used"
+          description: "SKU {{ $labels.sku }} in tenant {{ $labels.tenant }} is above the license_util_warn threshold."
+
+      - alert: M365LicenseExhausted
+        expr: m365_license_available <= 0 and m365_license_total > 0
+        for: 1h
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.customer }}: no {{ $labels.sku }} licences left ({{ $value }} available)"
+          description: "SKU {{ $labels.sku }} in tenant {{ $labels.tenant }} has no unassigned units."
+
+  - name: m365-storage
+    rules:
+      - alert: M365MailboxNearlyFull
+        expr: |
+          (m365_mailbox_used_bytes / (m365_mailbox_quota_bytes > 0))
+            > on(customer, tenant) group_left
+          m365_threshold{check="storage_used_warn"}
+        for: 2h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.customer }}: mailbox {{ $labels.upn }} is {{ $value | humanizePercentage }} full"
+          description: "Mailbox {{ $labels.upn }} in tenant {{ $labels.tenant }} is above storage_used_warn of its Prohibit Send quota."
+
+      - alert: M365OneDriveNearlyFull
+        expr: |
+          (m365_onedrive_used_bytes / (m365_onedrive_total_bytes > 0))
+            > on(customer, tenant) group_left
+          m365_threshold{check="storage_used_warn"}
+        for: 2h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.customer }}: OneDrive of {{ $labels.upn }} is {{ $value | humanizePercentage }} full"
+          description: "OneDrive of {{ $labels.upn }} in tenant {{ $labels.tenant }} is above storage_used_warn."
+
+  - name: m365-users
+    rules:
+      - alert: M365DisabledUserLicensed
+        expr: m365_users_disabled_licensed > 0
+        for: 1d
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.customer }}: {{ $value }} disabled user(s) still hold licences"
+          description: "Tenant {{ $labels.tenant }} pays for licences assigned to disabled accounts. See the dashboard for the list."
+
+      - alert: M365UserInactive
+        expr: |
+          (
+            (time() - m365_user_last_signin_timestamp)
+              > on(customer, tenant) group_left
+            (m365_threshold{check="inactive_days"} * 86400)
+          )
+          and on(customer, tenant, upn)
+          m365_user_info{enabled="true", licensed="true"}
+        for: 1h
+        labels:
+          severity: info
+        annotations:
+          summary: "{{ $labels.customer }}: {{ $labels.upn }} has not signed in for {{ $value | humanizeDuration }}"
+          description: "Licensed, enabled user {{ $labels.upn }} in tenant {{ $labels.tenant }} is past inactive_days."
+
+  - name: m365-mail
+    rules:
+      - alert: M365HighMailTraffic
+        expr: |
+          label_replace(
+            m365_mail_sent_7d > on(customer, tenant) group_left m365_threshold{check="mail_sent_max_7d"},
+            "direction", "sent", "", ""
+          )
+          or
+          label_replace(
+            m365_mail_received_7d > on(customer, tenant) group_left m365_threshold{check="mail_received_max_7d"},
+            "direction", "received", "", ""
+          )
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.customer }}: {{ $labels.upn }} {{ $labels.direction }} {{ $value }} mails in 7 days"
+          description: "Mail volume for {{ $labels.upn }} in tenant {{ $labels.tenant }} is above the {{ $labels.direction }} threshold (possible compromise or bulk sending)."
+
+      - alert: M365ReportsConcealed
+        expr: max by (customer, tenant) (m365_reports_concealed) == 1
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.customer }}: usage reports conceal user names in {{ $labels.tenant }}"
+          description: "Per-user mailbox and mail traffic metrics are skipped. In the M365 admin center: Settings > Org settings > Services > Reports, clear 'Display concealed user, group, and site names in all reports'."
+
+  - name: m365-tenant
+    rules:
+      - alert: M365ServiceDegraded
+        expr: |
+          m365_service_status{status=~"serviceDegradation|serviceInterruption|extendedRecovery|restoringService|investigating|verifyingService"} == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.customer }}: {{ $labels.service }} is {{ $labels.status }}"
+          description: "Microsoft reports {{ $labels.service }} as {{ $labels.status }} for tenant {{ $labels.tenant }}."
+
+      - alert: M365AppCredentialExpiring
+        expr: (m365_app_credential_expiry_timestamp - time()) < 30 * 86400
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.customer }}: {{ $labels.credential_type }} of app {{ $labels.app }} expires in {{ $value | humanizeDuration }}"
+          description: "App {{ $labels.app }} ({{ $labels.app_id }}) credential {{ $labels.key_id }} in tenant {{ $labels.tenant }} expires within 30 days (negative = already expired)."
+
+      - alert: M365TenantAuthFailed
+        expr: m365_tenant_auth_ok == 0
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.customer }}: cannot authenticate to tenant {{ $labels.tenant }}"
+          description: "Token request or Graph 401/403. Consent may be revoked or a permission missing. Run: m365c tenant verify {{ $labels.customer }}"
+
+  - name: m365-collector
+    rules:
+      - alert: M365CollectorFailing
+        expr: m365_collector_success == 0
+        for: 3h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.customer }}: collector {{ $labels.collector }} failing for {{ $labels.tenant }}"
+          description: "The last runs of {{ $labels.collector }} failed. Check the collector logs in Loki for tenant {{ $labels.tenant }}."
+
+      - alert: M365CollectorStale
+        expr: |
+          (time() - m365_collector_last_success_timestamp)
+            > 2 * m365_collector_interval_seconds
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.customer }}: {{ $labels.collector }} data for {{ $labels.tenant }} is {{ $value | humanizeDuration }} old"
+          description: "No successful {{ $labels.collector }} run for more than twice its interval."
+
+      - alert: M365CollectorDown
+        # When the exporter itself is gone, the per-collector Stale alert can't fire.
+        expr: absent(up{job="m365c"} == 1)
+        for: 15m
+        labels:
+          severity: critical
+          customer: netwatch
+          tenant: all
+        annotations:
+          summary: "m365c collector is down or not scraped"
+          description: "Prometheus cannot scrape the m365c collector; all M365 data is stale."

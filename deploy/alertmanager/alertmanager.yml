@@ -1,0 +1,47 @@
+# Secrets are read from files mounted as Compose secrets (/run/secrets/...).
+global:
+  smtp_smarthost: smtp.example.net:587
+  smtp_from: m365-alerts@netwatch.example
+  smtp_auth_username: m365-alerts@netwatch.example
+  smtp_auth_password_file: /run/secrets/alertmanager_smtp_password
+  smtp_require_tls: true
+
+route:
+  receiver: netwatch-noc
+  group_by: [customer, alertname]
+  group_wait: 1m
+  group_interval: 10m
+  repeat_interval: 12h
+  routes:
+    # Example per-customer route. Copy for each customer that wants direct alerts.
+    # `continue: true` lets the alert also reach the NOC default route below.
+    - matchers: ['customer="contoso"']
+      receiver: customer-contoso
+      continue: true
+    - matchers: ['customer=~".+"']
+      receiver: netwatch-noc
+
+receivers:
+  - name: netwatch-noc
+    email_configs:
+      - to: noc@netwatch.example
+        send_resolved: true
+
+  - name: customer-contoso
+    email_configs:
+      - to: it-admins@contoso.example
+        send_resolved: true
+    webhook_configs:
+      # e.g. a Teams/PSA/ticketing webhook; the URL (which embeds a token) lives in a file.
+      - url_file: /run/secrets/alertmanager_webhook_contoso
+        send_resolved: true
+
+inhibit_rules:
+  # Auth failures explain collector failures for the same tenant.
+  - source_matchers: [alertname="M365TenantAuthFailed"]
+    target_matchers: [alertname=~"M365CollectorFailing|M365CollectorStale"]
+    equal: [customer, tenant]
+  # Exhausted supersedes nearly exhausted for the same SKU.
+  - source_matchers: [alertname="M365LicenseExhausted"]
+    target_matchers: [alertname="M365LicenseNearlyExhausted"]
+    equal: [customer, tenant, sku]

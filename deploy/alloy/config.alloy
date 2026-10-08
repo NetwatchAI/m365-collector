@@ -1,0 +1,56 @@
+// Ship logs of containers labelled logs.netwatch/ship=true (the collector) to Loki.
+// m365c logs JSON lines; tenant/customer/collector are extracted as labels.
+
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+  filter {
+    name   = "label"
+    values = ["logs.netwatch/ship=true"]
+  }
+}
+
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+}
+
+loki.source.docker "containers" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.relabel.containers.output
+  relabel_rules = discovery.relabel.containers.rules
+  forward_to    = [loki.process.m365c.receiver]
+}
+
+loki.process "m365c" {
+  stage.json {
+    expressions = {
+      level     = "level",
+      customer  = "customer",
+      collector = "collector",
+    }
+  }
+  // Low-cardinality labels only; tenant/upn stay in the log line.
+  stage.labels {
+    values = {
+      level     = "",
+      customer  = "",
+      collector = "",
+    }
+  }
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
