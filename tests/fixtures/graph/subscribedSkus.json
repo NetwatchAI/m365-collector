@@ -1,0 +1,20 @@
+{
+  "value": [
+    {
+      "skuId": "cbdc14ab-d96c-4c30-b9f4-6ada7cdc1d46",
+      "skuPartNumber": "SPB",
+      "capabilityStatus": "Enabled",
+      "appliesTo": "User",
+      "consumedUnits": 24,
+      "prepaidUnits": {"enabled": 25, "suspended": 0, "warning": 0, "lockedOut": 0}
+    },
+    {
+      "skuId": "4b9405b0-7788-4568-add1-99614e613b69",
+      "skuPartNumber": "EXCHANGESTANDARD",
+      "capabilityStatus": "Enabled",
+      "appliesTo": "User",
+      "consumedUnits": 5,
+      "prepaidUnits": {"enabled": 5, "suspended": 2, "warning": 1, "lockedOut": 0}
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "@odata.nextLink": "https://graph.microsoft.com/v1.0/users?$skiptoken=page2",
+  "value": [
+    {
+      "id": "aaaaaaaa-0000-4000-8000-000000000001",
+      "userPrincipalName": "Alice@contoso.onmicrosoft.com",
+      "displayName": "Example, Alice",
+      "department": "Finance",
+      "accountEnabled": true,
+      "assignedLicenses": [{"skuId": "cbdc14ab-d96c-4c30-b9f4-6ada7cdc1d46", "disabledPlans": []}],
+      "signInActivity": {
+        "lastSignInDateTime": "2026-10-01T08:00:00Z",
+        "lastNonInteractiveSignInDateTime": "2026-10-05T09:30:00Z"
+      }
+    },
+    {
+      "id": "aaaaaaaa-0000-4000-8000-000000000002",
+      "userPrincipalName": "bob@contoso.onmicrosoft.com",
+      "displayName": "Bob Example",
+      "department": null,
+      "accountEnabled": true,
+      "assignedLicenses": [{"skuId": "cbdc14ab-d96c-4c30-b9f4-6ada7cdc1d46", "disabledPlans": []}],
+      "signInActivity": {"lastSignInDateTime": "2026-06-01T12:00:00Z", "lastNonInteractiveSignInDateTime": null}
+    },
+    {
+      "id": "aaaaaaaa-0000-4000-8000-000000000003",
+      "userPrincipalName": "carol@contoso.onmicrosoft.com",
+      "displayName": "Carol Example",
+      "department": "Sales",
+      "accountEnabled": false,
+      "assignedLicenses": [{"skuId": "4b9405b0-7788-4568-add1-99614e613b69", "disabledPlans": []}],
+      "signInActivity": null
+    }
+  ]
+}

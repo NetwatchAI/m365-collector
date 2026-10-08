@@ -1,0 +1,22 @@
+{
+  "value": [
+    {
+      "id": "aaaaaaaa-0000-4000-8000-000000000004",
+      "userPrincipalName": "dave@contoso.onmicrosoft.com",
+      "displayName": "Dave Example",
+      "department": "IT",
+      "accountEnabled": true,
+      "assignedLicenses": [],
+      "signInActivity": {"lastSignInDateTime": "2026-10-07T07:00:00Z"}
+    },
+    {
+      "@odata.type": "#microsoft.graph.agentUser",
+      "id": "aaaaaaaa-0000-4000-8000-000000000009",
+      "userPrincipalName": "agent-helper@contoso.onmicrosoft.com",
+      "displayName": "Helper Agent",
+      "department": null,
+      "accountEnabled": true,
+      "assignedLicenses": [{"skuId": "cbdc14ab-d96c-4c30-b9f4-6ada7cdc1d46", "disabledPlans": []}]
+    }
+  ]
+}

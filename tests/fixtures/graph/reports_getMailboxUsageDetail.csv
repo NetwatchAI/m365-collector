@@ -1,0 +1,4 @@
+﻿Report Refresh Date,User Principal Name,Display Name,Is Deleted,Deleted Date,Created Date,Last Activity Date,Item Count,Storage Used (Byte),Issue Warning Quota (Byte),Prohibit Send Quota (Byte),Prohibit Send/Receive Quota (Byte),Deleted Item Count,Deleted Item Size (Byte),Deleted Item Quota (Byte),Has Archive,Recipient Type,Report Period
+2026-10-06,Alice@contoso.onmicrosoft.com,"Example, Alice",False,,2024-01-10,2026-10-05,12345,48318382080,52613349376,53687091200,53687091200,10,1000,32212254720,True,User,7
+2026-10-06,bob@contoso.onmicrosoft.com,Bob Example,False,,2024-02-01,,200,1073741824,52613349376,53687091200,53687091200,0,0,32212254720,False,User,7
+2026-10-06,ghost@contoso.onmicrosoft.com,"Ghost, Former",True,2026-09-01,2023-05-05,2026-08-30,99,5000,52613349376,53687091200,53687091200,0,0,32212254720,False,User,7
