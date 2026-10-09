@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -19,6 +20,7 @@ REQUIRED_ALERTS = {
     "M365OneDriveNearlyFull", "M365DisabledUserLicensed", "M365UserInactive",
     "M365HighMailTraffic", "M365ServiceDegraded", "M365AppCredentialExpiring",
     "M365CollectorFailing", "M365CollectorStale", "M365TenantAuthFailed", "M365ReportsConcealed",
+    "M365CollectorDown", "M365PermissionMissing", "M365CertificateExpiring",
 }  # fmt: skip
 
 
@@ -47,9 +49,71 @@ def test_rules_reference_only_known_metrics() -> None:
             assert name in known, f"{rule['alert']} uses unknown metric {name}"
 
 
-@pytest.mark.skipif(shutil.which("promtool") is None, reason="promtool not installed")
+PROMETHEUS_IMAGE = "prom/prometheus:v3.5.0"
+ALERTMANAGER_IMAGE = "prom/alertmanager:v0.28.1"
+
+
+def _docker_ok() -> bool:
+    if shutil.which("docker") is None:
+        return False
+    return subprocess.run(["docker", "info"], capture_output=True, check=False).returncode == 0
+
+
+def _run_tool(tool: str, image: str, args: list[str], mount: Path, workdir: str = "/w") -> str:
+    """Run promtool/amtool locally if installed, else in its official image via Docker.
+
+    Without either, the test is skipped locally but FAILS when CI is set, so an invalid
+    rules file can never pass CI silently (review C1/M11).
+    """
+    if shutil.which(tool):
+        local = [a.replace(workdir, str(mount)) for a in args]
+        proc = subprocess.run([tool, *local], capture_output=True, text=True, check=False)
+    elif _docker_ok():
+        proc = subprocess.run(
+            ["docker", "run", "--rm", "-v", f"{mount.as_posix()}:{workdir}:ro", "-w", workdir,
+             "--entrypoint", tool, image, *args],
+            capture_output=True, text=True, check=False,
+        )  # fmt: skip
+    elif os.environ.get("CI"):
+        pytest.fail(f"{tool} not available (install it or Docker); required in CI")
+    else:
+        pytest.skip(f"{tool} not installed and Docker not available")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    return proc.stdout
+
+
 def test_promtool_check_rules() -> None:
-    subprocess.run(["promtool", "check", "rules", str(RULES)], check=True)
+    out = _run_tool("promtool", PROMETHEUS_IMAGE, ["check", "rules", "/w/rules/m365.yml"],
+                    DEPLOY / "prometheus")  # fmt: skip
+    assert "SUCCESS" in out
+
+
+def test_promtool_check_config() -> None:
+    # prometheus.yml points rule_files at /etc/prometheus/rules; mount it there.
+    out = _run_tool("promtool", PROMETHEUS_IMAGE, ["check", "config", "/etc/prometheus/prometheus.yml"],
+                    DEPLOY / "prometheus", workdir="/etc/prometheus")  # fmt: skip
+    assert "SUCCESS" in out
+
+
+def test_promtool_rule_unit_tests() -> None:
+    """Each alert fires (and does not fire) as intended: deploy/prometheus/tests."""
+    out = _run_tool("promtool", PROMETHEUS_IMAGE, ["test", "rules", "/w/tests/m365_test.yml"],
+                    DEPLOY / "prometheus")  # fmt: skip
+    assert "SUCCESS" in out
+
+
+def test_amtool_check_config() -> None:
+    out = _run_tool("amtool", ALERTMANAGER_IMAGE, ["check-config", "/w/alertmanager.yml"],
+                    DEPLOY / "alertmanager")  # fmt: skip
+    assert "SUCCESS" in out
+
+
+def test_every_alert_has_a_unit_test() -> None:
+    tests = yaml.safe_load(
+        (DEPLOY / "prometheus" / "tests" / "m365_test.yml").read_text(encoding="utf-8")
+    )
+    tested = {t["alertname"] for group in tests["tests"] for t in group.get("alert_rule_test", [])}
+    assert {str(r["alert"]) for r in _rules()} <= tested
 
 
 def test_dashboard_json_and_variables() -> None:
@@ -80,3 +144,24 @@ def test_compose_has_no_inline_secrets() -> None:
         assert set(secret) == {"file"}
     am = (DEPLOY / "alertmanager" / "alertmanager.yml").read_text(encoding="utf-8")
     assert "url_file" in am and "smtp_auth_password_file" in am
+
+
+def test_dashboard_queries_parse(tmp_path: Path) -> None:
+    """Every Prometheus query in the dashboard is valid PromQL: they are written into a
+    throwaway rule file (one recording rule each) and checked with promtool."""
+    dash = json.loads(
+        (DEPLOY / "grafana" / "dashboards" / "m365-overview.json").read_text(encoding="utf-8")
+    )
+    exprs = [
+        t["expr"].replace("$customer", ".*").replace("$tenant", ".*")
+        for panel in dash["panels"]
+        for t in panel.get("targets", [])
+        if t.get("datasource", {}).get("type") == "prometheus"
+    ]
+    assert len(exprs) > 15
+    rules = {"groups": [{"name": "dashboard", "rules": [
+        {"record": f"dashboard:query_{i}", "expr": e} for i, e in enumerate(exprs)
+    ]}]}  # fmt: skip
+    (tmp_path / "dashboard.yml").write_text(yaml.safe_dump(rules), encoding="utf-8")
+    out = _run_tool("promtool", PROMETHEUS_IMAGE, ["check", "rules", "/w/dashboard.yml"], tmp_path)
+    assert "SUCCESS" in out

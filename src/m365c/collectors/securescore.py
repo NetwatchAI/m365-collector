@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from m365c.collectors.base import BaseCollector, CollectorContext, MetricSample
+from m365c.collectors.base import BaseCollector, CollectorContext, MetricSample, to_timestamp
+
+PAGE = 7
 
 
 class SecureScoreCollector(BaseCollector):
@@ -15,12 +17,14 @@ class SecureScoreCollector(BaseCollector):
     }
 
     async def collect(self, ctx: CollectorContext) -> list[MetricSample]:
-        data = await ctx.graph.get_json("/security/secureScores", {"$top": "1"})
-        scores = data.get("value") or []
+        # The API returns one score per day but does not document the order, so take a
+        # small page and pick the newest by createdDateTime.
+        data = await ctx.graph.get_json("/security/secureScores", {"$top": str(PAGE)})
+        scores = [x for x in data.get("value") or [] if isinstance(x, dict)]
         if not scores:
             ctx.log.info("securescore_empty")
             return []
-        latest = scores[0]
+        latest = max(scores, key=lambda x: to_timestamp(x.get("createdDateTime")) or 0.0)
         samples = []
         if latest.get("currentScore") is not None:
             samples.append(MetricSample("m365_securescore_current", float(latest["currentScore"])))

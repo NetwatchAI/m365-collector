@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from m365c.config import (
     ConfigWatcher,
     TenantConfig,
     Thresholds,
+    hot_reload_env_overrides,
     load_all,
     load_settings,
     load_tenants,
@@ -176,36 +178,103 @@ def test_enabled_collectors() -> None:
     assert t.enabled_collectors(KNOWN) == ["license", "users"]
 
 
+def bump(path: Path, data: str | bytes) -> None:
+    stat = path.stat()
+    if isinstance(data, bytes):
+        path.write_bytes(data)
+    else:
+        write(path, data)
+    os.utime(path, (stat.st_atime, stat.st_mtime + 10))
+
+
+FABRIKAM = (
+    "tenants:\n  - id: 22222222-2222-2222-2222-222222222222\n"
+    "    name: fabrikam.onmicrosoft.com\n    customer: fabrikam\n"
+)
+
+
+class Recorder:
+    def __init__(self) -> None:
+        self.tenants: list[list[TenantConfig]] = []
+        self.thresholds: list[Thresholds] = []
+
+    async def on_tenants(self, t: list[TenantConfig]) -> None:
+        self.tenants.append(t)
+
+    async def on_thresholds(self, t: Thresholds) -> None:
+        self.thresholds.append(t)
+
+
 async def test_watcher_reloads_and_ignores_invalid(cfg_dir: Path) -> None:
-    seen_tenants: list[list[TenantConfig]] = []
-    seen_thresholds: list[Thresholds] = []
-
-    async def on_tenants(t: list[TenantConfig]) -> None:
-        seen_tenants.append(t)
-
-    async def on_thresholds(t: Thresholds) -> None:
-        seen_thresholds.append(t)
-
-    watcher = ConfigWatcher(cfg_dir, KNOWN, on_tenants, on_thresholds, interval=1)
+    rec = Recorder()
+    watcher = ConfigWatcher(cfg_dir, KNOWN, rec.on_tenants, rec.on_thresholds, interval=1)
     await watcher.check_once()
-    assert not seen_tenants and not seen_thresholds
+    assert not rec.tenants and not rec.thresholds
 
-    def bump(path: Path, text: str) -> None:
-        stat = path.stat()
-        write(path, text)
-        os.utime(path, (stat.st_atime, stat.st_mtime + 10))
-
-    bump(
-        cfg_dir / "tenants.yaml",
-        "tenants:\n  - id: 22222222-2222-2222-2222-222222222222\n    name: fabrikam.onmicrosoft.com\n    customer: fabrikam\n",
-    )
+    bump(cfg_dir / "tenants.yaml", FABRIKAM)
     await watcher.check_once()
-    assert [t.customer for t in seen_tenants[-1]] == ["fabrikam"]
+    assert not rec.tenants  # debounced: applied only once stable for one poll
+    await watcher.check_once()
+    assert [t.customer for t in rec.tenants[-1]] == ["fabrikam"]
 
     bump(cfg_dir / "tenants.yaml", "tenants: [oops\n")
     await watcher.check_once()
-    assert len(seen_tenants) == 1  # invalid file ignored, last good config stays
+    await watcher.check_once()
+    assert len(rec.tenants) == 1  # invalid file ignored, last good config stays
 
     bump(cfg_dir / "thresholds.yaml", "defaults:\n  inactive_days: 60\n")
     await watcher.check_once()
-    assert seen_thresholds[-1].resolve("x")["inactive_days"] == 60
+    await watcher.check_once()
+    assert rec.thresholds[-1].resolve("x")["inactive_days"] == 60
+
+
+@pytest.mark.parametrize("content", [b"", b"# all tenants removed by accident\n", b"\xff\xfe bad"])
+async def test_watcher_rejects_empty_or_unreadable_tenants(cfg_dir: Path, content: bytes) -> None:
+    rec = Recorder()
+    watcher = ConfigWatcher(cfg_dir, KNOWN, rec.on_tenants, rec.on_thresholds, interval=1)
+    bump(cfg_dir / "tenants.yaml", content)
+    await watcher.check_once()
+    await watcher.check_once()
+    assert rec.tenants == []  # nothing applied, last good config stays
+
+    bump(cfg_dir / "tenants.yaml", FABRIKAM)  # and the watcher still works afterwards
+    await watcher.check_once()
+    await watcher.check_once()
+    assert len(rec.tenants) == 1
+
+
+def test_explicit_empty_tenant_list_is_allowed(cfg_dir: Path) -> None:
+    write(cfg_dir / "tenants.yaml", "tenants: []\n")
+    assert load_tenants(cfg_dir, KNOWN) == []
+    write(cfg_dir / "tenants.yaml", "")
+    with pytest.raises(ConfigError, match="missing 'tenants:' key"):
+        load_tenants(cfg_dir, KNOWN)
+
+
+async def test_watcher_survives_callback_errors(cfg_dir: Path) -> None:
+    calls = 0
+
+    async def boom(_: list[TenantConfig]) -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("apply failed")
+
+    async def ignore(_: Thresholds) -> None:
+        return None
+
+    watcher = ConfigWatcher(cfg_dir, KNOWN, boom, ignore, interval=0.01)
+    task = asyncio.create_task(watcher.run())
+    bump(cfg_dir / "tenants.yaml", FABRIKAM)
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        if calls:
+            break
+    await asyncio.sleep(0.05)
+    assert calls == 1 and not task.done()  # error logged, watcher still running
+    task.cancel()
+
+
+def test_env_override_of_hot_reloaded_files_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("M365C_THRESHOLDS_DEFAULTS__INACTIVE_DAYS", "45")
+    monkeypatch.delenv("M365C_TENANTS", raising=False)
+    assert hot_reload_env_overrides() == ["M365C_THRESHOLDS_DEFAULTS__INACTIVE_DAYS"]

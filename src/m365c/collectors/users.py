@@ -18,14 +18,14 @@ BASE_SELECT = (
     "department",
     "accountEnabled",
     "assignedLicenses",
+    "createdDateTime",
 )
 AGENT_USER_TYPE = "#microsoft.graph.agentUser"
 AGENT_FILTER = "not isof('microsoft.graph.agentUser')"
-SIGNIN_FIELDS = (
-    "lastSignInDateTime",
-    "lastNonInteractiveSignInDateTime",
-    "lastSuccessfulSignInDateTime",
-)
+# lastSignInDateTime / lastNonInteractiveSignInDateTime record *attempts*, successful or
+# not, so a dormant account under password spray would look active. Only the successful
+# timestamp says the account was really used.
+SIGNIN_FIELD = "lastSuccessfulSignInDateTime"
 
 
 def is_agent_user(user: dict[str, Any]) -> bool:
@@ -68,7 +68,10 @@ class UsersCollector(BaseCollector):
     required_permissions = ("User.Read.All", "AuditLog.Read.All")
     metric_help: ClassVar[dict[str, str]] = {
         "m365_user_info": "User metadata; always 1",
-        "m365_user_last_signin_timestamp": "Unix time of the user's most recent sign-in",
+        "m365_user_last_signin_timestamp": (
+            "Unix time of the user's most recent successful sign-in (absent if never)"
+        ),
+        "m365_user_created_timestamp": "Unix time the user account was created",
         "m365_users_total": "Number of users by enabled/licensed state",
         "m365_users_disabled_licensed": "Disabled users that still hold licences",
         "m365_tenant_feature": "1 if an optional tenant feature is available to the collector",
@@ -121,12 +124,13 @@ class UsersCollector(BaseCollector):
                     },
                 )
             )
+            created = to_timestamp(user.get("createdDateTime"))
+            if created is not None:
+                samples.append(MetricSample("m365_user_created_timestamp", created, {"upn": upn}))
             activity = user.get("signInActivity") or {}
-            stamps = [ts for f in SIGNIN_FIELDS if (ts := to_timestamp(activity.get(f)))]
-            if stamps:
-                samples.append(
-                    MetricSample("m365_user_last_signin_timestamp", max(stamps), {"upn": upn})
-                )
+            last = to_timestamp(activity.get(SIGNIN_FIELD))
+            if last is not None:
+                samples.append(MetricSample("m365_user_last_signin_timestamp", last, {"upn": upn}))
 
         for (enabled, licensed), n in counts.items():
             samples.append(

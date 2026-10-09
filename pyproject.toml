@@ -51,6 +51,7 @@ ignore = ["RUF001"]  # ✅/❌ are intentional in CLI output
 [tool.ruff.lint.per-file-ignores]
 "src/m365c/cli.py" = ["B008"]  # typer defaults are calls by design
 "tests/**" = ["E501"]  # inline YAML/JSON fixture data
+"deploy/grafana/gen_dashboard.py" = ["E501"]  # dashboard JSON as data
 
 [tool.mypy]
 python_version = "3.12"

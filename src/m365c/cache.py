@@ -88,11 +88,17 @@ class SnapshotCache:
             Path(tmp).unlink(missing_ok=True)
             log.exception("cache_persist_failed", path=str(path))
 
-    def load(self, valid_keys: set[tuple[str, str]] | None = None) -> int:
-        """Load persisted snapshots; skip keys not in ``valid_keys`` when given."""
+    def load(
+        self, valid_keys: set[tuple[str, str]] | None = None, *, delete_unknown: bool = False
+    ) -> list[Snapshot]:
+        """Load persisted snapshots, skipping keys not in ``valid_keys`` when given.
+
+        With ``delete_unknown`` the skipped files are deleted: they belong to tenants or
+        collectors removed while the service was down and hold user data (UPNs, names).
+        """
         if self._dir is None:
-            return 0
-        loaded = 0
+            return []
+        loaded: list[Snapshot] = []
         for path in sorted(self._dir.glob("*.json")):
             try:
                 raw = json.loads(path.read_text(encoding="utf-8"))
@@ -106,7 +112,12 @@ class SnapshotCache:
                 log.warning("cache_entry_unreadable", path=str(path))
                 continue
             if valid_keys is not None and (snap.tenant_id, snap.collector) not in valid_keys:
+                if delete_unknown:
+                    path.unlink(missing_ok=True)
+                    log.info(
+                        "cache_entry_deleted", tenant_id=snap.tenant_id, collector=snap.collector
+                    )
                 continue
             self._data[(snap.tenant_id, snap.collector)] = snap
-            loaded += 1
+            loaded.append(snap)
         return loaded

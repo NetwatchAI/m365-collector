@@ -75,3 +75,23 @@ def test_httpx_debug_cannot_emit(capsys: pytest.CaptureFixture[str]) -> None:
         )
         logging.getLogger(name).info("HTTP Request: GET https://x/?tempauth=abc")
     assert capsys.readouterr().out == ""
+
+
+def test_redaction_gaps_from_review(capsys: pytest.CaptureFixture[str]) -> None:
+    """Review M7: dict reprs in exception text, non-dict Mappings, form-encoded secrets
+    and stdlib %s args must all be redacted."""
+    import types
+
+    configure_logging("INFO", json=True)
+    log = structlog.get_logger("t")
+    try:
+        raise RuntimeError(str({"access_token": "LEAK_A", "client_secret": "LEAK_B"}))
+    except RuntimeError:
+        log.exception("boom")
+    log.info("hdrs", headers=types.MappingProxyType({"Authorization": "LEAK_C"}))
+    log.info("body", body="grant_type=client_credentials&client_secret=LEAK_D&scope=x")
+    logging.getLogger("aiohttp.client").warning("request %s", {"password": "LEAK_E"})
+    out = capsys.readouterr().out
+    for leak in ("LEAK_A", "LEAK_B", "LEAK_C", "LEAK_D", "LEAK_E"):
+        assert leak not in out, leak
+    assert "client_credentials" in out  # non-secret parts survive

@@ -6,9 +6,8 @@ from m365c.collectors.base import BaseCollector, CollectorContext, MetricSample,
 from m365c.collectors.reports import (
     CONCEALED_HELP,
     REPORT_PERMISSIONS,
-    concealed_sample,
     live_rows,
-    reports_concealed,
+    report_rows,
 )
 
 REPORT = "/reports/getEmailActivityUserDetail(period='D7')"
@@ -32,11 +31,7 @@ class MailTrafficCollector(BaseCollector):
     }
 
     async def collect(self, ctx: CollectorContext) -> list[MetricSample]:
-        concealed = await reports_concealed(ctx)
-        samples = [concealed_sample(concealed, self.name)]
-        if concealed:
-            return samples
-        rows = await ctx.graph.get_report_csv(REPORT)
+        samples, rows = await report_rows(ctx, self.name, REPORT)
         for upn, row in live_rows(rows):
             labels = {"upn": upn}
             for column, metric in _COLUMNS:

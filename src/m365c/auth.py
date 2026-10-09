@@ -10,14 +10,19 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import structlog
-from azure.core.exceptions import ClientAuthenticationError
+from azure.core.exceptions import AzureError, ClientAuthenticationError
 from azure.identity.aio import CertificateCredential
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.serialization import pkcs12
 
-from m365c.secrets import SecretBytes
+from m365c.secrets import SecretBytes, load_secret
 
 log = structlog.get_logger(__name__)
 
@@ -25,11 +30,95 @@ GRAPH_SCOPE = "https://graph.microsoft.com/.default"
 
 
 class TokenError(Exception):
-    """A token could not be obtained for a tenant (consent missing, bad cert, ...)."""
+    """A token could not be obtained for a tenant.
 
-    def __init__(self, tenant_id: str, message: str) -> None:
+    ``transient`` is True for identity-service outages and network errors (retry later);
+    False for real auth failures (``AADSTS`` errors: consent missing, cert not uploaded,
+    tenant not found, unusable certificate).
+    """
+
+    def __init__(self, tenant_id: str, message: str, *, transient: bool = False) -> None:
         super().__init__(f"token request for tenant {tenant_id} failed: {message}")
         self.tenant_id = tenant_id
+        self.transient = transient
+
+
+class CertificateError(Exception):
+    """The configured certificate cannot be used. The message never contains key material."""
+
+
+@dataclass(frozen=True)
+class CertificateInfo:
+    subject: str
+    thumbprint: str  # SHA-1, upper-case hex: what the Entra portal shows
+    not_before: float
+    not_after: float
+
+    def expired(self, now: float | None = None) -> bool:
+        return (now if now is not None else datetime.now(UTC).timestamp()) >= self.not_after
+
+
+_PEM_KEY = re.compile(rb"-----BEGIN ([A-Z ]*)PRIVATE KEY-----.+?-----END \1PRIVATE KEY-----", re.S)
+
+
+def inspect_certificate(data: bytes, password: bytes | None = None) -> CertificateInfo:
+    """Parse the PEM (key + certificate) or PKCS#12 bundle and check the key matches.
+
+    Called once at startup so a broken certificate fails fast instead of failing every
+    token request later.
+    """
+    key: Any
+    certs: list[x509.Certificate]
+    if b"-----BEGIN" in data:
+        match = _PEM_KEY.search(data)
+        if match is None:
+            raise CertificateError("PEM contains no private key (need key + certificate)")
+        try:
+            key = serialization.load_pem_private_key(match.group(0), password)
+        except TypeError as exc:
+            raise CertificateError(f"private key password problem: {exc}") from None
+        except ValueError:
+            raise CertificateError("private key could not be loaded (wrong password?)") from None
+        try:
+            certs = x509.load_pem_x509_certificates(data)
+        except ValueError:
+            raise CertificateError("PEM contains no certificate (need key + certificate)") from None
+    else:
+        try:
+            key, cert, extra = pkcs12.load_key_and_certificates(data, password)
+        except ValueError:
+            raise CertificateError("not a PEM or PKCS#12 bundle, or wrong password") from None
+        if key is None or cert is None:
+            raise CertificateError("PKCS#12 bundle needs both a private key and a certificate")
+        certs = [cert, *extra]
+
+    spki = serialization.PublicFormat.SubjectPublicKeyInfo
+    key_pub = key.public_key().public_bytes(serialization.Encoding.DER, spki)
+    for cert in certs:
+        if cert.public_key().public_bytes(serialization.Encoding.DER, spki) == key_pub:
+            return CertificateInfo(
+                subject=cert.subject.rfc4514_string(),
+                thumbprint=cert.fingerprint(hashes.SHA1()).hex().upper(),
+                not_before=cert.not_valid_before_utc.timestamp(),
+                not_after=cert.not_valid_after_utc.timestamp(),
+            )
+    raise CertificateError("no certificate in the bundle matches the private key")
+
+
+def load_app_certificate(
+    cert_ref: str, password_ref: str | None
+) -> tuple[SecretBytes, SecretBytes | None, CertificateInfo]:
+    """Load the certificate (and password) secrets and check them. Raises SecretError or
+    CertificateError with a message that names the reference, never the content."""
+    cert = load_secret(cert_ref)
+    password = load_secret(password_ref) if password_ref else None
+    try:
+        info = inspect_certificate(cert.get(), password.get() if password else None)
+    except CertificateError as exc:
+        raise CertificateError(
+            f"{cert_ref.split(':', 1)[0]}: certificate unusable: {exc}"
+        ) from None
+    return cert, password, info
 
 
 class TokenProvider(Protocol):
@@ -55,12 +144,15 @@ class CertificateTokenProvider:
         async with self._lock:
             cred = self._credentials.get(tenant_id)
             if cred is None:
-                cred = CertificateCredential(
-                    tenant_id,
-                    self._client_id,
-                    certificate_data=self._certificate.get(),
-                    password=self._password.get() if self._password else None,
-                )
+                try:
+                    cred = CertificateCredential(
+                        tenant_id,
+                        self._client_id,
+                        certificate_data=self._certificate.get(),
+                        password=self._password.get() if self._password else None,
+                    )
+                except (ValueError, TypeError) as exc:  # certificate parsed lazily here
+                    raise TokenError(tenant_id, f"unusable certificate: {exc}") from None
                 self._credentials[tenant_id] = cred
             return cred
 
@@ -71,9 +163,13 @@ class CertificateTokenProvider:
         except ClientAuthenticationError as exc:
             # Only the AAD error summary; azure-identity messages do not contain tokens.
             message = (exc.message or type(exc).__name__).splitlines()[0]
-            raise TokenError(tenant_id, message) from None
-        except ValueError as exc:  # unreadable certificate data
-            raise TokenError(tenant_id, f"invalid certificate: {exc}") from None
+            # AADSTS codes are definitive (consent, cert, tenant); anything else (identity
+            # service 5xx, malformed response) is treated as transient.
+            raise TokenError(tenant_id, message, transient="AADSTS" not in message) from None
+        except AzureError as exc:  # network errors talking to login.microsoftonline.com
+            raise TokenError(tenant_id, type(exc).__name__, transient=True) from None
+        except (ValueError, TypeError) as exc:  # unreadable certificate data
+            raise TokenError(tenant_id, f"unusable certificate: {exc}") from None
         log.debug(
             "token_acquired",
             tenant_id=tenant_id,

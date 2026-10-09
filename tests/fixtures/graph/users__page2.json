@@ -7,7 +7,11 @@
       "department": "IT",
       "accountEnabled": true,
       "assignedLicenses": [],
-      "signInActivity": {"lastSignInDateTime": "2026-10-07T07:00:00Z"}
+      "signInActivity": {
+        "lastSignInDateTime": "2026-10-07T07:00:00Z",
+        "lastSuccessfulSignInDateTime": "2026-10-07T07:00:00Z"
+      },
+      "createdDateTime": "2025-03-01T09:00:00Z"
     },
     {
       "@odata.type": "#microsoft.graph.agentUser",
@@ -16,7 +20,13 @@
       "displayName": "Helper Agent",
       "department": null,
       "accountEnabled": true,
-      "assignedLicenses": [{"skuId": "cbdc14ab-d96c-4c30-b9f4-6ada7cdc1d46", "disabledPlans": []}]
+      "assignedLicenses": [
+        {
+          "skuId": "cbdc14ab-d96c-4c30-b9f4-6ada7cdc1d46",
+          "disabledPlans": []
+        }
+      ],
+      "createdDateTime": "2025-03-01T09:00:00Z"
     }
   ]
 }

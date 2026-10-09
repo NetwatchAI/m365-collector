@@ -16,14 +16,32 @@ from m365c.cache import Snapshot
 from m365c.collectors.base import CollectorContext, MetricSample
 from m365c.config import Settings, TenantConfig
 from m365c.graph import GraphAuthError, GraphClient
-from m365c.health import forget_graph_counters
+from m365c.health import FailureKind, forget_graph_counters
 from m365c.state import AppState
 
 log = structlog.get_logger(__name__)
 
 MAX_INITIAL_JITTER_S = 300.0
+# After a failed run, retry sooner than the full interval: 5m, 10m, 20m, ... capped at 1h
+# (and never later than the normal interval).
+RETRY_BASE_S = 300.0
+RETRY_CAP_S = 3600.0
 
 Key = tuple[str, str]
+
+
+def classify_failure(exc: BaseException) -> FailureKind:
+    if isinstance(exc, TokenError):
+        return FailureKind.TRANSIENT_TOKEN if exc.transient else FailureKind.TOKEN
+    if isinstance(exc, GraphAuthError):
+        return FailureKind.UNAUTHORIZED if exc.status == 401 else FailureKind.FORBIDDEN
+    return FailureKind.OTHER
+
+
+def next_delay(interval: float, consecutive_failures: int) -> float:
+    if consecutive_failures <= 0:
+        return interval
+    return float(min(interval, RETRY_CAP_S, RETRY_BASE_S * 2 ** (consecutive_failures - 1)))
 
 
 @dataclass
@@ -84,7 +102,11 @@ class Scheduler:
             if after is None or not after.enabled:
                 self._state.cache.drop_tenant(tid)
                 self._state.health.drop_tenant(tid)
-            if after is None or (after.name, after.customer) != (before.name, before.customer):
+            if (
+                after is None
+                or not after.enabled
+                or (after.name, after.customer) != (before.name, before.customer)
+            ):
                 forget_graph_counters(before.name, before.customer)
 
         desired = self.desired_keys()
@@ -108,7 +130,7 @@ class Scheduler:
         clog = log.bind(tenant=tenant.name, customer=tenant.customer, collector=collector_name)
         ctx = CollectorContext(
             tenant=tenant,
-            graph=self._graph.for_tenant(tenant),
+            graph=self._graph.for_tenant(tenant, collector_name),
             log=clog,
             state=self._memory.setdefault(key, {}),
         )
@@ -119,14 +141,19 @@ class Scheduler:
             raise
         except Exception as exc:
             duration = time.perf_counter() - start
-            auth_failed = isinstance(exc, GraphAuthError | TokenError)
-            if auth_failed:
-                clog.error("collector_auth_failed", error=str(exc), duration_s=round(duration, 3))
-            else:
+            kind = classify_failure(exc)
+            if kind is FailureKind.OTHER:
                 clog.exception("collector_failed", error=str(exc), duration_s=round(duration, 3))
+            else:
+                clog.error(
+                    "collector_failed",
+                    failure=kind.value,
+                    error=str(exc),
+                    duration_s=round(duration, 3),
+                )
             if write:
                 self._state.health.record_failure(
-                    tenant.id, collector_name, duration, str(exc), auth_failed=auth_failed
+                    tenant.id, collector_name, duration, str(exc), kind
                 )
             return RunResult(tenant, collector_name, False, duration, error=str(exc))
 
@@ -143,17 +170,20 @@ class Scheduler:
         tenant_id, collector = key
         interval = self.interval(collector)
         await self._sleep(self._rng() * min(interval, MAX_INITIAL_JITTER_S))
+        failures = 0
         while True:
             tenant = self._state.tenants.get(tenant_id)
             if tenant is None:
                 return
             try:
-                await self.run_once(tenant, collector)
+                ok = (await self.run_once(tenant, collector)).ok
             except asyncio.CancelledError:
                 raise
             except Exception:  # run_once handles collector errors; this is belt and braces
                 log.exception("scheduler_loop_error", tenant=tenant.name, collector=collector)
-            await self._sleep(interval)
+                ok = False
+            failures = 0 if ok else failures + 1
+            await self._sleep(next_delay(interval, failures))
 
     async def stop(self) -> None:
         tasks = list(self._tasks.values())

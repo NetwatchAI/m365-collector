@@ -7,12 +7,16 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 
+import structlog
 from prometheus_client import CollectorRegistry
 from prometheus_client.metrics_core import Metric
 from prometheus_client.registry import Collector
 
 from m365c import __version__
+from m365c.health import FailureKind
 from m365c.state import AppState
+
+log = structlog.get_logger(__name__)
 
 BUILTIN_HELP: dict[str, str] = {
     "m365_collector_success": "1 if the collector's last run succeeded, else 0",
@@ -23,6 +27,11 @@ BUILTIN_HELP: dict[str, str] = {
     "m365_tenant_auth_ok": "0 if the tenant's last runs hit a token or Graph 401/403 error",
     "m365_threshold": "Alert threshold resolved for the tenant's customer",
     "m365_collector_build_info": "m365c build information",
+    "m365_collector_permission_ok": "0 if the collector's last run got a Graph 403",
+    "m365_exporter_duplicate_series": (
+        "Samples dropped because another sample had the same name and labels"
+    ),
+    "m365_cert_expiry_timestamp": "Unix time when the app registration certificate expires",
 }
 
 
@@ -32,16 +41,18 @@ class _Families:
         self._families: dict[str, Metric] = {}
         self._seen: set[tuple[str, frozenset[tuple[str, str]]]] = set()
 
-    def add(self, name: str, labels: dict[str, str], value: float) -> None:
+    def add(self, name: str, labels: dict[str, str], value: float) -> bool:
+        """Add a sample; returns False if it duplicates an existing series."""
         # A duplicate series would make Prometheus reject the whole scrape: keep the first.
         key = (name, frozenset(labels.items()))
         if key in self._seen:
-            return
+            return False
         self._seen.add(key)
         family = self._families.get(name)
         if family is None:
             family = self._families[name] = Metric(name, self._help.get(name, name), "gauge")
         family.add_sample(name, labels, value)
+        return True
 
     def __iter__(self) -> Iterator[Metric]:
         return iter(self._families.values())
@@ -66,17 +77,35 @@ class M365Exporter(Collector):
             if tenant is None or not tenant.enabled:
                 continue
             base = {"customer": tenant.customer, "tenant": tenant.name}
+            dropped = 0
             for sample in snap.samples:
-                out.add(sample.name, {**base, **sample.labels}, sample.value)
+                if not out.add(sample.name, {**base, **sample.labels}, sample.value):
+                    dropped += 1
+            if dropped:
+                log.warning(
+                    "duplicate_series_dropped",
+                    tenant=tenant.name,
+                    customer=tenant.customer,
+                    collector=snap.collector,
+                    dropped=dropped,
+                )
+                out.add(
+                    "m365_exporter_duplicate_series",
+                    {**base, "collector": snap.collector},
+                    float(dropped),
+                )
 
         for (tenant_id, collector), run in list(state.health.runs.items()):
             tenant = state.tenants.get(tenant_id)
             if tenant is None or not tenant.enabled:
                 continue
             labels = {"customer": tenant.customer, "tenant": tenant.name, "collector": collector}
-            out.add("m365_collector_success", labels, 1.0 if run.success else 0.0)
-            out.add("m365_collector_duration_seconds", labels, run.duration_s)
-            out.add("m365_collector_samples", labels, float(run.samples))
+            if not run.restored:  # restored snapshots only carry their collection time
+                out.add("m365_collector_success", labels, 1.0 if run.success else 0.0)
+                out.add("m365_collector_duration_seconds", labels, run.duration_s)
+                out.add("m365_collector_samples", labels, float(run.samples))
+                permission_ok = run.failure is not FailureKind.FORBIDDEN
+                out.add("m365_collector_permission_ok", labels, 1.0 if permission_ok else 0.0)
             if collector in state.intervals:
                 out.add("m365_collector_interval_seconds", labels, state.intervals[collector])
             if run.last_success_ts is not None:
@@ -90,6 +119,12 @@ class M365Exporter(Collector):
             for check, value in state.thresholds.resolve(tenant.customer).items():
                 out.add("m365_threshold", {**base, "check": check}, float(value))
 
+        if state.certificate is not None:
+            out.add(
+                "m365_cert_expiry_timestamp",
+                {"thumbprint": state.certificate.thumbprint},
+                state.certificate.not_after,
+            )
         out.add("m365_collector_build_info", {"version": __version__}, 1.0)
         return list(out)
 

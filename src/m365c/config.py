@@ -13,7 +13,9 @@ using ``__`` as the nesting delimiter, e.g. ``M365C_HTTP__MAX_CONCURRENCY=10``.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
+import tempfile
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -251,6 +253,10 @@ def _read_yaml(path: Path, *, required: bool) -> dict[str, Any]:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
         raise ConfigError(f"{path}: invalid YAML: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"{path}: not valid UTF-8 ({exc.reason} at byte {exc.start})") from exc
+    except OSError as exc:  # e.g. a file locked by an editor on Windows
+        raise ConfigError(f"{path}: cannot read ({exc.strerror or exc})") from exc
     if data is None:
         return {}
     if not isinstance(data, dict):
@@ -277,7 +283,18 @@ def load_settings(config_dir: Path) -> Settings:
 
 def load_tenants(config_dir: Path, known_collectors: list[str]) -> list[TenantConfig]:
     path = config_dir / TENANTS_FILE
-    data = _read_yaml(path, required=True)
+    return parse_tenants(_read_yaml(path, required=True), path, known_collectors)
+
+
+def parse_tenants(
+    data: dict[str, Any], path: Path, known_collectors: list[str]
+) -> list[TenantConfig]:
+    if "tenants" not in data and not os.environ.get("M365C_TENANTS"):
+        # An empty or truncated file must not silently drop every tenant.
+        raise ConfigError(
+            f"{path}: missing 'tenants:' key (file empty or truncated?); "
+            "write 'tenants: []' to run with no tenants"
+        )
     try:
         parsed = TenantsFile(**data)
     except ValidationError as exc:
@@ -293,6 +310,25 @@ def load_tenants(config_dir: Path, known_collectors: list[str]) -> list[TenantCo
     return parsed.tenants
 
 
+def write_tenants(config_dir: Path, tenants: list[TenantConfig], known: list[str]) -> Path:
+    """Validate, then atomically replace tenants.yaml (temp file + os.replace), so the
+    hot-reload watcher never sees a partial or invalid file. Comments are not kept."""
+    path = config_dir / TENANTS_FILE
+    data = {"tenants": [t.model_dump(mode="json") for t in tenants]}
+    parse_tenants(data, path, known)  # raises ConfigError before anything is written
+    text = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tenants-", suffix=".yaml")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    return path
+
+
 def load_thresholds(config_dir: Path) -> Thresholds:
     path = config_dir / THRESHOLDS_FILE
     data = _read_yaml(path, required=False)
@@ -300,6 +336,14 @@ def load_thresholds(config_dir: Path) -> Thresholds:
         return Thresholds(**data)
     except ValidationError as exc:
         raise ConfigError(_format_validation(path, exc)) from exc
+
+
+def hot_reload_env_overrides() -> list[str]:
+    """M365C_* variables that override the hot-reloaded files (edits to them then appear
+    to do nothing, so this is logged at startup)."""
+    return sorted(
+        k for k in os.environ if k == "M365C_TENANTS" or k.startswith("M365C_THRESHOLDS_")
+    )
 
 
 def validate_intervals(settings: Settings, known_collectors: list[str]) -> None:
@@ -332,9 +376,12 @@ def load_all(config_dir: Path, known_collectors: list[str]) -> LoadedConfig:
 
 
 class ConfigWatcher:
-    """Polls tenants.yaml and thresholds.yaml mtimes and reloads them on change.
+    """Polls tenants.yaml and thresholds.yaml and reloads them on change.
 
-    An invalid file is logged and ignored: the last good configuration stays active.
+    A change is applied only once the file's (mtime, size) has been stable for one poll,
+    so a half-written file from a non-atomic save is not picked up. An invalid or
+    unreadable file is logged and ignored: the last good configuration stays active, and
+    the watcher itself never dies on an error.
     """
 
     FILES: ClassVar[tuple[str, ...]] = (TENANTS_FILE, THRESHOLDS_FILE)
@@ -352,33 +399,48 @@ class ConfigWatcher:
         self._on_tenants = on_tenants
         self._on_thresholds = on_thresholds
         self._interval = interval
-        self._mtimes = {name: self._mtime(name) for name in self.FILES}
+        self._applied = {name: self._signature(name) for name in self.FILES}
+        self._pending: dict[str, tuple[float, int] | None] = dict.fromkeys(self.FILES)
 
-    def _mtime(self, name: str) -> float | None:
+    def _signature(self, name: str) -> tuple[float, int] | None:
         try:
-            return (self._dir / name).stat().st_mtime
-        except FileNotFoundError:
+            st = (self._dir / name).stat()
+        except OSError:
             return None
+        return (st.st_mtime, st.st_size)
+
+    async def _apply(self, name: str) -> None:
+        if name == TENANTS_FILE:
+            tenants = load_tenants(self._dir, self._known)
+            log.info("config_reloaded", file=name, tenants=len(tenants))
+            await self._on_tenants(tenants)
+        else:
+            thresholds = load_thresholds(self._dir)
+            log.info("config_reloaded", file=name)
+            await self._on_thresholds(thresholds)
 
     async def check_once(self) -> None:
         for name in self.FILES:
-            current = self._mtime(name)
-            if current == self._mtimes[name]:
+            current = self._signature(name)
+            if current == self._applied[name]:
+                self._pending[name] = None
                 continue
-            self._mtimes[name] = current
+            if current != self._pending[name]:
+                self._pending[name] = current  # changed: wait until it is stable
+                continue
+            self._applied[name] = current
+            self._pending[name] = None
             try:
-                if name == TENANTS_FILE:
-                    tenants = load_tenants(self._dir, self._known)
-                    log.info("config_reloaded", file=name, tenants=len(tenants))
-                    await self._on_tenants(tenants)
-                else:
-                    thresholds = load_thresholds(self._dir)
-                    log.info("config_reloaded", file=name)
-                    await self._on_thresholds(thresholds)
+                await self._apply(name)
             except ConfigError as exc:
                 log.error("config_reload_failed", file=name, error=str(exc))
+            except Exception as exc:
+                log.exception("config_reload_failed", file=name, error=str(exc))
 
     async def run(self) -> None:
         while True:
             await asyncio.sleep(self._interval)
-            await self.check_once()
+            try:
+                await self.check_once()
+            except Exception:  # never let hot reload stop for good
+                log.exception("config_watcher_error")

@@ -11,12 +11,18 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
-import yaml
 from pydantic import ValidationError
 from rich.console import Console
 from rich.table import Table
 
-from m365c.auth import CertificateTokenProvider, TokenError, TokenProvider, decode_jwt_claims
+from m365c.auth import (
+    CertificateError,
+    CertificateTokenProvider,
+    TokenError,
+    TokenProvider,
+    decode_jwt_claims,
+    load_app_certificate,
+)
 from m365c.cache import SnapshotCache
 from m365c.collectors import all_collectors, permissions
 from m365c.config import (
@@ -27,11 +33,12 @@ from m365c.config import (
     load_all,
     load_settings,
     load_tenants,
+    write_tenants,
 )
 from m365c.graph import GraphAuthError, GraphClient, GraphError
 from m365c.logging import configure_logging
 from m365c.scheduler import RunResult, Scheduler
-from m365c.secrets import SecretError, load_secret
+from m365c.secrets import SecretError
 from m365c.state import AppState
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="Microsoft 365 collector")
@@ -105,10 +112,7 @@ def _token_provider(settings: Settings, fixtures: Path | None) -> TokenProvider:
         from m365c.fixtures import fixture_token_provider
 
         return fixture_token_provider(permissions())
-    cert = load_secret(settings.secrets.cert)
-    password = (
-        load_secret(settings.secrets.cert_password) if settings.secrets.cert_password else None
-    )
+    cert, password, _ = load_app_certificate(settings.secrets.cert, settings.secrets.cert_password)
     return CertificateTokenProvider(settings.app.client_id, cert, password)
 
 
@@ -130,15 +134,23 @@ def _match(tenants: list[TenantConfig], selector: str) -> list[TenantConfig]:
 
 
 @app.command()
-def serve(ctx: typer.Context) -> None:
+def serve(ctx: typer.Context, fixtures: FixturesOpt = None) -> None:
     """Run the long-running collector service."""
     from m365c.main import serve as run_service
 
     c = _ctx(ctx)
     configure_logging(c.log_level, json=True)
+    kwargs: dict[str, Any] = {}
+    if fixtures is not None:  # offline demo / end-to-end test of the deploy stack
+        from m365c.fixtures import fixture_token_provider, fixture_transport
+
+        kwargs = {
+            "tokens": fixture_token_provider(permissions()),
+            "transport": fixture_transport(fixtures),
+        }
     try:
-        asyncio.run(run_service(c.config_dir))
-    except (ConfigError, SecretError) as exc:
+        asyncio.run(run_service(c.config_dir, **kwargs))
+    except (ConfigError, SecretError, CertificateError) as exc:
         raise _fail(str(exc)) from None
     except KeyboardInterrupt:
         pass
@@ -191,32 +203,20 @@ def tenant_add(
     except ValidationError as exc:
         raise _fail("; ".join(f"{e['loc'][0]}: {e['msg']}" for e in exc.errors())) from None
 
-    path = c.config_dir / TENANTS_FILE
+    known = list(all_collectors())
     existing: list[TenantConfig] = []
-    if path.exists():
+    if (c.config_dir / TENANTS_FILE).exists():
         try:
-            existing = load_tenants(c.config_dir, list(all_collectors()))
+            existing = load_tenants(c.config_dir, known)
         except ConfigError as exc:
             raise _fail(str(exc)) from None
     for t in existing:
         if t.id == new.id or t.name == new.name:
             raise _fail(f"tenant already configured: {t.name} ({t.id}), customer {t.customer}")
-
-    entry = new.model_dump(mode="json")
-    if existing:
-        # Append text so comments in the file survive.
-        block = yaml.safe_dump([entry], sort_keys=False, allow_unicode=True)
-        text = path.read_text(encoding="utf-8")
-        indented = "".join(f"  {line}\n" for line in block.splitlines())
-        path.write_text(text + ("" if text.endswith("\n") else "\n") + indented, encoding="utf-8")
-    else:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(yaml.safe_dump({"tenants": [entry]}, sort_keys=False), encoding="utf-8")
-
     try:
-        load_tenants(c.config_dir, list(all_collectors()))
-    except ConfigError as exc:  # pragma: no cover - defensive; we validated above
-        raise _fail(f"tenants.yaml is invalid after the edit: {exc}") from None
+        path = write_tenants(c.config_dir, [*existing, new], known)
+    except ConfigError as exc:
+        raise _fail(str(exc)) from None
 
     out.print(f"Added {new.name} (customer {new.customer}) to {path}", highlight=False)
     out.print("Send this admin-consent URL to a Global Administrator of the client tenant:")
@@ -303,7 +303,7 @@ def tenant_verify(
     try:
         cfg = load_all(c.config_dir, list(all_collectors()))
         tokens = _token_provider(cfg.settings, fixtures)
-    except (ConfigError, SecretError) as exc:
+    except (ConfigError, SecretError, CertificateError) as exc:
         raise _fail(str(exc)) from None
     tenants = _match(cfg.tenants, selector)
     if not tenants:
@@ -352,7 +352,7 @@ def run(
     try:
         cfg = load_all(c.config_dir, list(collectors))
         tokens = _token_provider(cfg.settings, fixtures)
-    except (ConfigError, SecretError) as exc:
+    except (ConfigError, SecretError, CertificateError) as exc:
         raise _fail(str(exc)) from None
 
     unknown = sorted(set(collector or []) - set(collectors))

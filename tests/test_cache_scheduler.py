@@ -6,12 +6,17 @@ import shutil
 from pathlib import Path
 
 import httpx
+import pytest
 
+from m365c import health as health_module
+from m365c.auth import TokenError
 from m365c.cache import Snapshot, SnapshotCache
 from m365c.collectors.base import MetricSample
-from m365c.config import Settings, TenantConfig
+from m365c.config import HttpConfig, Settings, TenantConfig
 from m365c.fixtures import fixture_transport
-from m365c.scheduler import Scheduler
+from m365c.graph import GraphClient
+from m365c.health import FailureKind
+from m365c.scheduler import Scheduler, next_delay
 from m365c.state import AppState
 
 from .conftest import GRAPH_FIXTURES, SleepRecorder, make_fixture_graph
@@ -70,26 +75,108 @@ async def test_failed_run_keeps_previous_snapshot(
     assert not result.ok
     assert app_state.cache.get(tenant.id, "license") is before
     health = app_state.health.runs[(tenant.id, "license")]
-    assert not health.success and not health.auth_failed
+    assert not health.success and health.failure is FailureKind.OTHER
     assert health.last_success_ts == last_success
     assert app_state.health.auth_ok(tenant.id) is True
     await good.aclose()
     await broken.aclose()
 
 
-async def test_auth_failure_sets_auth_not_ok(app_state: AppState, tenant: TenantConfig) -> None:
-    denied = make_fixture_graph(
+def _error_graph(status: int, code: str) -> GraphClient:
+    return make_fixture_graph(
         transport=httpx.MockTransport(
-            lambda r: httpx.Response(
-                403, json={"error": {"code": "Authorization_RequestDenied", "message": "x"}}
-            )
+            lambda r: httpx.Response(status, json={"error": {"code": code, "message": "x"}})
         )
     )
+
+
+async def test_403_is_a_permission_problem_not_auth(
+    app_state: AppState, tenant: TenantConfig
+) -> None:
+    denied = _error_graph(403, "Authorization_RequestDenied")
     scheduler = Scheduler(app_state, denied, settings())
-    result = await scheduler.run_once(tenant, "license")
-    assert not result.ok
-    assert app_state.health.auth_ok(tenant.id) is False
+    assert not (await scheduler.run_once(tenant, "license")).ok
+    assert app_state.health.runs[(tenant.id, "license")].failure is FailureKind.FORBIDDEN
+    assert app_state.health.auth_ok(tenant.id) is True  # token fine, Graph answered
     await denied.aclose()
+
+
+async def test_auth_failure_and_fast_recovery(app_state: AppState, tenant: TenantConfig) -> None:
+    unauthorized = _error_graph(401, "InvalidAuthenticationToken")
+    scheduler = Scheduler(app_state, unauthorized, settings())
+    assert not (await scheduler.run_once(tenant, "appsecrets")).ok
+    assert app_state.health.auth_ok(tenant.id) is False
+
+    # Consent fixed: the next run of *any* collector (servicehealth every 5m) recovers it,
+    # without waiting for the daily appsecrets run.
+    good = make_fixture_graph()
+    scheduler = Scheduler(app_state, good, settings())
+    assert (await scheduler.run_once(tenant, "servicehealth")).ok
+    assert app_state.health.auth_ok(tenant.id) is True
+    await unauthorized.aclose()
+    await good.aclose()
+
+
+class _FailingTokens:
+    def __init__(self, transient: bool) -> None:
+        self.transient = transient
+
+    async def get_token(self, tenant_id: str) -> str:
+        raise TokenError(tenant_id, "AADSTS700016: app not found", transient=self.transient)
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.mark.parametrize(("transient", "auth_ok"), [(False, False), (True, None)])
+async def test_token_failures(
+    app_state: AppState, tenant: TenantConfig, transient: bool, auth_ok: bool | None
+) -> None:
+    graph = GraphClient(_FailingTokens(transient), HttpConfig(max_retries=0))
+    scheduler = Scheduler(app_state, graph, settings())
+    assert not (await scheduler.run_once(tenant, "license")).ok
+    # A transient identity-service error says nothing about consent: auth_ok stays unknown.
+    assert app_state.health.auth_ok(tenant.id) is auth_ok
+    await graph.aclose()
+
+
+def test_retry_delay_after_failures() -> None:
+    assert next_delay(86400, 0) == 86400
+    assert [next_delay(86400, n) for n in (1, 2, 3, 4, 5)] == [300, 600, 1200, 2400, 3600]
+    assert next_delay(300, 3) == 300  # never later than the normal interval
+
+
+async def test_failed_run_retries_sooner(app_state: AppState, tenant: TenantConfig) -> None:
+    sleeps: list[float] = []
+    done = asyncio.Event()
+
+    async def record(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) >= 4:
+            done.set()
+            await asyncio.Event().wait()
+
+    graph = make_fixture_graph(transport=httpx.MockTransport(lambda r: httpx.Response(500)))
+    scheduler = Scheduler(app_state, graph, settings(), sleep=record, rng=lambda: 0.0)
+    await scheduler.apply_tenants([tenant.model_copy(update={"collectors": ["appsecrets"]})])
+    await asyncio.wait_for(done.wait(), timeout=5)
+    assert sleeps[:4] == [0.0, 300.0, 600.0, 1200.0]  # jitter, then backoff, not 24h
+    await scheduler.stop()
+    await graph.aclose()
+
+
+async def test_disabled_tenant_forgets_graph_counters(
+    app_state: AppState, tenant: TenantConfig
+) -> None:
+    graph = make_fixture_graph()
+    scheduler = Scheduler(app_state, graph, settings())
+    await scheduler.apply_tenants([tenant])
+    await scheduler.run_once(tenant, "license")
+    assert ("contoso.onmicrosoft.com", "contoso", "200") in health_module._request_labels
+    await scheduler.apply_tenants([tenant.model_copy(update={"enabled": False})])
+    assert not [x for x in health_module._request_labels if x[1] == "contoso"]
+    await scheduler.stop()
+    await graph.aclose()
 
 
 async def test_dry_run_writes_nothing(app_state: AppState, tenant: TenantConfig) -> None:
@@ -176,18 +263,27 @@ def test_cache_persistence_round_trip(tmp_path: Path) -> None:
     cache.replace(Snapshot("t2", "license", 1.0, ()))
 
     restored = SnapshotCache(tmp_path)
-    assert restored.load({("t1", "license")}) == 1
+    assert restored.load({("t1", "license")}) == [snap]
     assert restored.get("t1", "license") == snap
     assert restored.get("t2", "license") is None
+    assert list(tmp_path.glob("t2__*.json"))  # kept unless asked to delete
+
+    SnapshotCache(tmp_path).load({("t1", "license")}, delete_unknown=True)
+    assert not list(tmp_path.glob("t2__*.json"))  # orphaned user data removed
+    cache.replace(Snapshot("t2", "license", 1.0, ()))
 
     cache.drop_tenant("t1")
     assert not list(tmp_path.glob("t1__*.json"))
     assert list(tmp_path.glob("t2__*.json"))
 
 
-def test_fixture_transport_never_leaks_auth() -> None:
-    # sanity check for the dev-aid transport itself
-    transport = fixture_transport(GRAPH_FIXTURES)
-    with httpx.Client(transport=transport) as c:  # type: ignore[arg-type]
+def test_fixture_transport_rejects_auth_on_download_host() -> None:
+    """The dev-aid transport fails loudly if anything sends Authorization to the
+    pre-authenticated download host."""
+    with httpx.Client(transport=fixture_transport(GRAPH_FIXTURES)) as c:
         r = c.get("https://graph.microsoft.com/v1.0/reports/getMailboxUsageDetail(period='D7')")
         assert r.status_code == 302
+        location = r.headers["Location"]
+        assert c.get(location).status_code == 200
+        with pytest.raises(AssertionError, match="auth header leaked"):
+            c.get(location, headers={"Authorization": "Bearer x"})

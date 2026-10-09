@@ -83,7 +83,7 @@ async def test_users(fixture_graph: GraphClient, tenant: TenantConfig) -> None:
     }
     # most recent of interactive / non-interactive
     assert value(s, "m365_user_last_signin_timestamp", upn="alice@contoso.onmicrosoft.com") == ts(
-        "2026-10-05T09:30:00"
+        "2026-10-01T08:00:00"
     )
     assert not find(s, "m365_user_last_signin_timestamp", upn="carol@contoso.onmicrosoft.com")
     assert value(s, "m365_users_total", enabled="true", licensed="true") == 2

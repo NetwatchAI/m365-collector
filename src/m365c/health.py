@@ -3,14 +3,25 @@
 Health state is kept per ``(tenant_id, collector)`` in plain Python and rendered by the
 exporter, so removing a tenant removes its health series too. The Graph request
 counters are ordinary prometheus_client Counters on the same registry.
+
+Auth is split in two signals:
+
+- tenant auth (``m365_tenant_auth_ok``): the most recent token request / Graph call of
+  *any* collector for the tenant. A token failure or Graph 401 sets it to 0; any
+  successful call sets it back to 1, so it recovers within one servicehealth cycle.
+- collector permission (``m365_collector_permission_ok``): 0 while the collector's last
+  run got a Graph 403 (a missing application permission or licence-gated feature).
 """
 
 from __future__ import annotations
 
+import enum
 import time
 from dataclasses import dataclass, field
 
-from prometheus_client import CollectorRegistry, Counter
+from prometheus_client import CollectorRegistry, Counter, disable_created_metrics
+
+disable_created_metrics()  # type: ignore[no-untyped-call]  # no *_created series
 
 REGISTRY = CollectorRegistry()
 
@@ -27,6 +38,37 @@ GRAPH_THROTTLED = Counter(
     registry=REGISTRY,
 )
 
+_request_labels: set[tuple[str, str, str]] = set()
+_throttled_labels: set[tuple[str, str]] = set()
+
+
+def count_request(tenant: str, customer: str, status: str) -> None:
+    _request_labels.add((tenant, customer, status))
+    GRAPH_REQUESTS.labels(tenant, customer, status).inc()
+
+
+def count_throttled(tenant: str, customer: str) -> None:
+    _throttled_labels.add((tenant, customer))
+    GRAPH_THROTTLED.labels(tenant, customer).inc()
+
+
+def forget_graph_counters(tenant: str, customer: str) -> None:
+    """Remove Graph counter series for a tenant that was removed or disabled."""
+    for labels in [x for x in _request_labels if x[:2] == (tenant, customer)]:
+        GRAPH_REQUESTS.remove(*labels)
+        _request_labels.discard(labels)
+    if (tenant, customer) in _throttled_labels:
+        GRAPH_THROTTLED.remove(tenant, customer)
+        _throttled_labels.discard((tenant, customer))
+
+
+class FailureKind(enum.Enum):
+    TOKEN = "token"  # definitive token failure (AADSTS: consent, cert, tenant)
+    UNAUTHORIZED = "unauthorized"  # Graph 401
+    FORBIDDEN = "forbidden"  # Graph 403: permission missing / licence-gated
+    TRANSIENT_TOKEN = "transient_token"  # identity service unavailable
+    OTHER = "other"
+
 
 @dataclass
 class RunHealth:
@@ -34,53 +76,66 @@ class RunHealth:
     duration_s: float
     samples: int
     last_success_ts: float | None
-    auth_failed: bool = False
+    failure: FailureKind | None = None
     error: str | None = None
+    restored: bool = False  # seeded from a persisted snapshot; no run happened yet
 
 
 @dataclass
 class HealthState:
     runs: dict[tuple[str, str], RunHealth] = field(default_factory=dict)
+    tenant_auth: dict[str, bool] = field(default_factory=dict)
     attempted_any: bool = False
 
     def record_success(self, tenant_id: str, collector: str, duration: float, samples: int) -> None:
         self.attempted_any = True
+        self.tenant_auth[tenant_id] = True
         self.runs[(tenant_id, collector)] = RunHealth(
             success=True, duration_s=duration, samples=samples, last_success_ts=time.time()
         )
 
     def record_failure(
-        self, tenant_id: str, collector: str, duration: float, error: str, *, auth_failed: bool
+        self, tenant_id: str, collector: str, duration: float, error: str, kind: FailureKind
     ) -> None:
         self.attempted_any = True
+        if kind in (FailureKind.TOKEN, FailureKind.UNAUTHORIZED):
+            self.tenant_auth[tenant_id] = False
+        elif kind is FailureKind.FORBIDDEN:
+            self.tenant_auth[tenant_id] = True  # we got a token and Graph answered
         prev = self.runs.get((tenant_id, collector))
         self.runs[(tenant_id, collector)] = RunHealth(
             success=False,
             duration_s=duration,
             samples=prev.samples if prev else 0,
             last_success_ts=prev.last_success_ts if prev else None,
-            auth_failed=auth_failed,
+            failure=kind,
             error=error,
         )
 
+    def seed_restored(
+        self, tenant_id: str, collector: str, collected_at: float, samples: int
+    ) -> None:
+        """Remember when a persisted snapshot was collected, so staleness is visible after
+        a restart even if the collector keeps failing."""
+        self.runs.setdefault(
+            (tenant_id, collector),
+            RunHealth(
+                success=True,
+                duration_s=0.0,
+                samples=samples,
+                last_success_ts=collected_at,
+                restored=True,
+            ),
+        )
+
     def auth_ok(self, tenant_id: str) -> bool | None:
-        """False if any collector's last run hit an auth error; None before any run."""
-        runs = [h for (t, _), h in self.runs.items() if t == tenant_id]
-        if not runs:
-            return None
-        return not any(h.auth_failed for h in runs)
+        """Latest auth outcome for the tenant; None before any run."""
+        return self.tenant_auth.get(tenant_id)
 
     def drop_tenant(self, tenant_id: str) -> None:
         for key in [k for k in self.runs if k[0] == tenant_id]:
             del self.runs[key]
+        self.tenant_auth.pop(tenant_id, None)
 
     def drop(self, tenant_id: str, collector: str) -> None:
         self.runs.pop((tenant_id, collector), None)
-
-
-def forget_graph_counters(tenant: str, customer: str) -> None:
-    """Remove Graph counter series for a tenant that was removed from config."""
-    for counter in (GRAPH_REQUESTS, GRAPH_THROTTLED):
-        for labels in list(counter._metrics):  # prometheus_client exposes no public lister
-            if labels[0] == tenant and labels[1] == customer:
-                counter.remove(*labels)

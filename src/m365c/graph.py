@@ -18,7 +18,7 @@ import structlog
 from m365c import __version__
 from m365c.auth import TokenProvider
 from m365c.config import HttpConfig, TenantConfig
-from m365c.health import GRAPH_REQUESTS, GRAPH_THROTTLED
+from m365c.health import count_request, count_throttled
 
 log = structlog.get_logger(__name__)
 
@@ -50,7 +50,7 @@ class GraphNotFoundError(GraphError):
     """404."""
 
 
-def _error_from(resp: httpx.Response) -> GraphError:
+def _error_from(resp: httpx.Response, *, auth: bool = True) -> GraphError:
     code, message = "unknown", resp.reason_phrase
     try:
         body = resp.json()
@@ -60,6 +60,9 @@ def _error_from(resp: httpx.Response) -> GraphError:
     except ValueError:
         pass
     status = resp.status_code
+    if not auth:
+        # A pre-authenticated download URL that expired is not a tenant auth problem.
+        return GraphError(status, code, message)
     if status in (401, 403):
         return GraphAuthError(status, code, message)
     if status == 404:
@@ -120,8 +123,8 @@ class GraphClient:
             headers={"User-Agent": f"m365c/{__version__}"},
         )
 
-    def for_tenant(self, tenant: TenantConfig) -> TenantGraph:
-        return TenantGraph(self, tenant)
+    def for_tenant(self, tenant: TenantConfig, collector: str | None = None) -> TenantGraph:
+        return TenantGraph(self, tenant, collector)
 
     def _tenant_sem(self, tenant_id: str) -> asyncio.Semaphore:
         sem = self._tenant_sems.get(tenant_id)
@@ -132,6 +135,10 @@ class GraphClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    @property
+    def per_tenant_concurrency(self) -> int:
+        return self._per_tenant
+
     async def send(
         self,
         tenant: TenantConfig,
@@ -141,64 +148,74 @@ class GraphClient:
         params: Mapping[str, str] | None = None,
         headers: Mapping[str, str] | None = None,
         auth: bool = True,
+        collector: str | None = None,
     ) -> httpx.Response:
-        """Send with retries. Returns any non-retryable response; raises on 4xx/5xx."""
+        """Send with retries. Returns any non-retryable response; raises on 4xx/5xx.
+
+        ``auth=False`` is used for pre-authenticated report downloads: no Authorization
+        header is sent, and the URL path (which *is* the download credential) is never
+        logged.
+        """
+        ctx = {"tenant": tenant.name, "customer": tenant.customer, "collector": collector}
+        target = httpx.URL(url)
+        log_path = target.path if auth else "<report-download>"
         attempt = 0
         while True:
             delay: float
-            resp: httpx.Response | None
+            resp: httpx.Response | None = None
             req_headers = dict(headers or {})
-            async with self._global_sem, self._tenant_sem(tenant.id):
-                if auth:
-                    req_headers["Authorization"] = (
-                        f"Bearer {await self._tokens.get_token(tenant.id)}"
-                    )
+            if auth:
+                # Outside the semaphores: a slow token endpoint must not hold Graph slots.
+                req_headers["Authorization"] = f"Bearer {await self._tokens.get_token(tenant.id)}"
+            # Per-tenant slot first: a tenant's backlog then waits on its own semaphore
+            # without holding global slots, so it cannot starve other tenants.
+            async with self._tenant_sem(tenant.id), self._global_sem:
                 start = time.perf_counter()
                 try:
                     resp = await self._client.request(
                         method, url, params=params, headers=req_headers
                     )
                 except httpx.TransportError as exc:
-                    GRAPH_REQUESTS.labels(tenant.name, tenant.customer, "error").inc()
+                    count_request(tenant.name, tenant.customer, "error")
                     log.debug(
                         "graph_request",
-                        tenant=tenant.name,
+                        **ctx,
                         method=method,
-                        path=httpx.URL(url).path,
+                        host=target.host,
+                        path=log_path,
                         status="error",
                         error=type(exc).__name__,
                     )
                     if attempt >= self._max_retries:
                         raise GraphError(0, "transport_error", type(exc).__name__) from exc
                     delay = backoff_delay(attempt)
-                    resp = None
             if resp is not None:
                 duration_ms = round((time.perf_counter() - start) * 1000, 1)
                 status = resp.status_code
-                GRAPH_REQUESTS.labels(tenant.name, tenant.customer, str(status)).inc()
+                count_request(tenant.name, tenant.customer, str(status))
                 log.debug(
                     "graph_request",
-                    tenant=tenant.name,
+                    **ctx,
                     method=method,
-                    host=resp.request.url.host,
-                    path=resp.request.url.path,
+                    host=target.host,
+                    path=log_path,
                     status=status,
                     duration_ms=duration_ms,
                 )
                 if status not in RETRY_STATUSES:
                     if status >= 400:
-                        raise _error_from(resp)
+                        raise _error_from(resp, auth=auth)
                     return resp
                 if status in THROTTLE_STATUSES:
-                    GRAPH_THROTTLED.labels(tenant.name, tenant.customer).inc()
+                    count_throttled(tenant.name, tenant.customer)
                 if attempt >= self._max_retries:
-                    raise _error_from(resp)
+                    raise _error_from(resp, auth=auth)
                 retry_after = parse_retry_after(resp.headers.get("Retry-After"))
                 delay = retry_after if retry_after is not None else backoff_delay(attempt)
                 log.info(
                     "graph_retry",
-                    tenant=tenant.name,
-                    path=resp.request.url.path,
+                    **ctx,
+                    path=log_path,
                     status=status,
                     attempt=attempt + 1,
                     delay_s=round(delay, 2),
@@ -208,9 +225,17 @@ class GraphClient:
 
 
 class TenantGraph:
-    def __init__(self, client: GraphClient, tenant: TenantConfig) -> None:
+    def __init__(
+        self, client: GraphClient, tenant: TenantConfig, collector: str | None = None
+    ) -> None:
         self._client = client
         self.tenant = tenant
+        self.collector = collector
+
+    @property
+    def concurrency(self) -> int:
+        """How many requests this tenant may have in flight at once."""
+        return self._client.per_tenant_concurrency
 
     @staticmethod
     def _url(path: str, beta: bool) -> str:
@@ -227,7 +252,12 @@ class TenantGraph:
         headers: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         resp = await self._client.send(
-            self.tenant, "GET", self._url(path, beta), params=params, headers=headers
+            self.tenant,
+            "GET",
+            self._url(path, beta),
+            params=params,
+            headers=headers,
+            collector=self.collector,
         )
         data = resp.json()
         if not isinstance(data, dict):
@@ -258,11 +288,15 @@ class TenantGraph:
     async def get_report_csv(self, path: str, *, beta: bool = False) -> list[dict[str, str]]:
         """Fetch a usage report. Graph answers 302 to a pre-authenticated download URL,
         which is fetched without our Authorization header."""
-        resp = await self._client.send(self.tenant, "GET", self._url(path, beta))
+        resp = await self._client.send(
+            self.tenant, "GET", self._url(path, beta), collector=self.collector
+        )
         if resp.status_code in REDIRECT_STATUSES:
             location = resp.headers.get("Location")
             if not location:
                 raise GraphError(resp.status_code, "invalid_redirect", "redirect without Location")
             target = str(resp.request.url.join(location))
-            resp = await self._client.send(self.tenant, "GET", target, auth=False)
+            resp = await self._client.send(
+                self.tenant, "GET", target, auth=False, collector=self.collector
+            )
         return parse_csv(resp.content)

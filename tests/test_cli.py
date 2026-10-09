@@ -149,3 +149,41 @@ def test_tenant_verify_reports_concealed(cfg_dir: Path, tmp_path: Path) -> None:
     )
     assert code == 1
     assert "❌" in output and "concealed" in output
+
+
+def test_tenant_add_twice_from_empty_dir(cfg_dir: Path) -> None:
+    """Review H2: the second add used to corrupt tenants.yaml."""
+    (cfg_dir / "tenants.yaml").unlink()
+    for i, slug in ((3, "x"), (4, "y"), (5, "z")):
+        code, output = invoke(
+            "-c", str(cfg_dir), "tenant", "add", "--tenant-id", f"{i}" * 8 + "-" + "-".join([f"{i}" * 4] * 3) + "-" + f"{i}" * 12,
+            "--name", f"{slug}.onmicrosoft.com", "--customer", slug,
+        )  # fmt: skip
+        assert code == 0, output
+    code, output = invoke("-c", str(cfg_dir), "tenant", "list")
+    assert code == 0, output
+    data = yaml.safe_load((cfg_dir / "tenants.yaml").read_text(encoding="utf-8"))
+    assert [t["customer"] for t in data["tenants"]] == ["x", "y", "z"]
+    assert not list(cfg_dir.glob(".tenants-*"))  # temp file cleaned up
+
+
+def test_tenant_add_never_writes_an_invalid_file(cfg_dir: Path) -> None:
+    before = (cfg_dir / "tenants.yaml").read_bytes()
+    code, output = invoke(
+        "-c", str(cfg_dir), "tenant", "add", "--tenant-id", "44444444-4444-4444-4444-444444444444",
+        "--name", "contoso.onmicrosoft.com", "--customer", "dup",
+    )  # fmt: skip
+    assert code == 2 and "already configured" in output
+    assert (cfg_dir / "tenants.yaml").read_bytes() == before
+
+
+def test_verify_with_bad_certificate_is_a_clean_error(cfg_dir: Path, tmp_path: Path) -> None:
+    """Review H3: a garbage certificate used to crash verify with a traceback."""
+    cert = tmp_path / "bad.pem"
+    cert.write_bytes(b"garbage")
+    settings = (cfg_dir / "settings.yaml").read_text(encoding="utf-8")
+    settings = settings.replace("file:/nonexistent/m365c_cert", f"file:{cert.as_posix()}")
+    (cfg_dir / "settings.yaml").write_text(settings, encoding="utf-8")
+    code, output = invoke("-c", str(cfg_dir), "tenant", "verify", "contoso")
+    assert code == 2, output
+    assert "certificate unusable" in output and "Traceback" not in output

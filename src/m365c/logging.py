@@ -1,10 +1,15 @@
 """structlog configuration: JSON lines on stdout, with secret redaction.
 
 Standard-library loggers (azure-identity, aiohttp, ...) are routed through the same
-processor chain, so redaction applies to them too. httpx/httpcore are pinned to
-WARNING and filtered so that request lines (which may contain pre-authenticated
-report download URLs) and headers can never be emitted, even when the root level is
-DEBUG.
+processor chain, so redaction applies to them too, including their formatted ``%s``
+arguments and exception tracebacks. httpx/httpcore are pinned to WARNING and filtered so
+that their request lines and headers are never emitted, even when the root level is
+DEBUG. The Graph client itself never logs the path of a pre-authenticated report
+download URL (the path is the credential).
+
+Redaction: sensitive keys anywhere in nested mappings/sequences, plus credential-shaped
+text in any string (Bearer tokens, JWTs, PEM private keys, ``?tempauth=`` style query
+parameters, and ``key=value`` / ``'key': 'value'`` pairs for secret-like keys).
 """
 
 from __future__ import annotations
@@ -12,7 +17,7 @@ from __future__ import annotations
 import logging
 import re
 import sys
-from collections.abc import MutableMapping
+from collections.abc import Mapping, MutableMapping
 from typing import Any
 
 import structlog
@@ -36,6 +41,16 @@ _VALUE_PATTERNS = (
         re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S),
         REDACTED,
     ),
+    # key=value, key: value, 'key': 'value', "key"="value" for secret-like keys, e.g. a
+    # dict repr inside an exception message or a form-encoded token request body.
+    (
+        re.compile(
+            r"(?i)([\"']?\b(?:client_secret|access_token|refresh_token|id_token|"
+            r"client_assertion|password|passwd|secret|token|authorization)\b[\"']?"
+            r"\s*[:=]\s*)([\"']?)(?!Bearer\b)(?!\[REDACTED\])[^\"'&\s,;}]+"
+        ),
+        rf"\1\2{REDACTED}",
+    ),
 )
 
 _QUIET_LOGGERS = ("httpx", "httpcore", "hpack", "urllib3")
@@ -55,7 +70,7 @@ def scrub_string(value: str) -> str:
 
 
 def _redact(value: Any) -> Any:
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):  # dict, MappingProxy, httpx.Headers, CIMultiDict, ...
         return {
             k: (REDACTED if isinstance(k, str) and is_sensitive_key(k) else _redact(v))
             for k, v in value.items()
