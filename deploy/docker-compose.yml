@@ -90,6 +90,22 @@ services:
     expose:
       - "3100"
 
+  # Alloy reads container logs through this proxy instead of mounting the Docker socket:
+  # the raw socket is root-equivalent on the host. The proxy only allows read-only
+  # GET /containers/* (list, inspect, logs) and GET /networks; everything else (any
+  # POST, exec, images, volumes, ...) is refused.
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    restart: unless-stopped
+    environment:
+      CONTAINERS: "1"
+      NETWORKS: "1"  # Alloy discovery reads network labels
+      POST: "0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    expose:
+      - "2375"
+
   alloy:
     image: grafana/alloy:v1.10.0
     restart: unless-stopped
@@ -100,10 +116,10 @@ services:
       - --server.http.listen-addr=0.0.0.0:12345
     volumes:
       - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
       - alloy-data:/var/lib/alloy/data
     depends_on:
       - loki
+      - docker-proxy
 
 secrets:
   m365c_cert:

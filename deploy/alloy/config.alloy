@@ -1,8 +1,9 @@
+// Docker API access goes through the read-only docker-proxy service.
 // Ship logs of containers labelled logs.netwatch/ship=true (the collector) to Loki.
 // m365c logs JSON lines; tenant/customer/collector are extracted as labels.
 
 discovery.docker "containers" {
-  host = "unix:///var/run/docker.sock"
+  host = "tcp://docker-proxy:2375"
   filter {
     name   = "label"
     values = ["logs.netwatch/ship=true"]
@@ -24,7 +25,7 @@ discovery.relabel "containers" {
 }
 
 loki.source.docker "containers" {
-  host          = "unix:///var/run/docker.sock"
+  host          = "tcp://docker-proxy:2375"
   targets       = discovery.relabel.containers.output
   relabel_rules = discovery.relabel.containers.rules
   forward_to    = [loki.process.m365c.receiver]

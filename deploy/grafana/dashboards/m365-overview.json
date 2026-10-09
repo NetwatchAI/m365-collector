@@ -749,7 +749,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "((time() - m365_user_last_signin_timestamp{customer=~\"$customer\",tenant=~\"$tenant\"}) / 86400) > on(customer, tenant) group_left m365_threshold{customer=~\"$customer\",tenant=~\"$tenant\",check=\"inactive_days\"} and on(customer, tenant, upn) m365_user_info{customer=~\"$customer\",tenant=~\"$tenant\",enabled=\"true\",licensed=\"true\"}",
+          "expr": "((time() - m365_user_last_signin_timestamp{customer=~\"$customer\",tenant=~\"$tenant\"}) / 86400) > on(customer, tenant) group_left() m365_threshold{customer=~\"$customer\",tenant=~\"$tenant\",check=\"inactive_days\"} and on(customer, tenant, upn) m365_user_info{customer=~\"$customer\",tenant=~\"$tenant\",enabled=\"true\",licensed=\"true\"}",
           "refId": "A",
           "legendFormat": "",
           "instant": true,
@@ -799,22 +799,91 @@
       }
     },
     {
+      "type": "table",
+      "title": "Licensed users who never signed in (days since account creation)",
+      "id": 15,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "((time() - m365_user_created_timestamp{customer=~\"$customer\",tenant=~\"$tenant\"}) / 86400) and on(customer, tenant, upn) m365_user_info{customer=~\"$customer\",tenant=~\"$tenant\",enabled=\"true\",licensed=\"true\"} unless on(customer, tenant, upn) m365_user_last_signin_timestamp{customer=~\"$customer\",tenant=~\"$tenant\"} and on(customer, tenant) (m365_tenant_feature{customer=~\"$customer\",tenant=~\"$tenant\",feature=\"signin_activity\"} == 1)",
+          "refId": "A",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true
+            },
+            "renameByName": {
+              "Value": "account age (days)"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "account age (days)",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
       "type": "row",
       "title": "Mail",
-      "id": 15,
+      "id": 16,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 38
+        "y": 46
       },
       "panels": []
     },
     {
       "type": "bargauge",
       "title": "Top 10 senders (7d)",
-      "id": 16,
+      "id": 17,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -823,7 +892,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 39
+        "y": 47
       },
       "targets": [
         {
@@ -871,7 +940,7 @@
     {
       "type": "bargauge",
       "title": "Top 10 receivers (7d)",
-      "id": 17,
+      "id": 18,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -880,7 +949,7 @@
         "h": 10,
         "w": 12,
         "x": 12,
-        "y": 39
+        "y": 47
       },
       "targets": [
         {
@@ -928,20 +997,20 @@
     {
       "type": "row",
       "title": "Tenant health",
-      "id": 18,
+      "id": 19,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 49
+        "y": 57
       },
       "panels": []
     },
     {
       "type": "table",
       "title": "Service health",
-      "id": 19,
+      "id": 20,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -950,7 +1019,7 @@
         "h": 10,
         "w": 8,
         "x": 0,
-        "y": 50
+        "y": 58
       },
       "targets": [
         {
@@ -1036,7 +1105,7 @@
     {
       "type": "timeseries",
       "title": "Secure score",
-      "id": 20,
+      "id": 21,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1045,7 +1114,7 @@
         "h": 10,
         "w": 8,
         "x": 8,
-        "y": 50
+        "y": 58
       },
       "targets": [
         {
@@ -1082,8 +1151,8 @@
     },
     {
       "type": "table",
-      "title": "App credentials expiring within 60 days",
-      "id": 21,
+      "title": "App credentials expiring within 60 days (negative = expired)",
+      "id": 22,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1092,7 +1161,7 @@
         "h": 10,
         "w": 8,
         "x": 16,
-        "y": 50
+        "y": 58
       },
       "targets": [
         {
@@ -1152,20 +1221,20 @@
     {
       "type": "row",
       "title": "Collector health",
-      "id": 22,
+      "id": 23,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 60
+        "y": 68
       },
       "panels": []
     },
     {
       "type": "table",
       "title": "Collectors",
-      "id": 23,
+      "id": 24,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1174,7 +1243,7 @@
         "h": 10,
         "w": 14,
         "x": 0,
-        "y": 61
+        "y": 69
       },
       "targets": [
         {
@@ -1224,6 +1293,18 @@
           "instant": true,
           "range": false,
           "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "m365_collector_permission_ok{customer=~\"$customer\",tenant=~\"$tenant\"}",
+          "refId": "E",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
         }
       ],
       "transformations": [
@@ -1244,7 +1325,8 @@
               "Value #A": "ok",
               "Value #B": "since last success",
               "Value #C": "duration",
-              "Value #D": "samples"
+              "Value #D": "samples",
+              "Value #E": "permission"
             }
           }
         }
@@ -1288,6 +1370,38 @@
           {
             "matcher": {
               "id": "byName",
+              "options": "permission"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "OK",
+                        "color": "green"
+                      },
+                      "0": {
+                        "text": "403",
+                        "color": "red"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
               "options": "ok"
             },
             "properties": [
@@ -1323,7 +1437,7 @@
     {
       "type": "timeseries",
       "title": "Graph requests / throttling",
-      "id": 24,
+      "id": 25,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1332,7 +1446,7 @@
         "h": 10,
         "w": 10,
         "x": 14,
-        "y": 61
+        "y": 69
       },
       "targets": [
         {
@@ -1370,7 +1484,7 @@
     {
       "type": "logs",
       "title": "Collector logs (warnings and errors)",
-      "id": 25,
+      "id": 26,
       "datasource": {
         "type": "loki",
         "uid": "loki"
@@ -1379,7 +1493,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 71
+        "y": 79
       },
       "targets": [
         {

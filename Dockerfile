@@ -36,7 +36,7 @@ WORKDIR /var/lib/m365c
 EXPOSE 9365
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD ["python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9365/healthz', timeout=3).status == 200 else 1)"]
+  CMD ["python", "-c", "import os, sys, urllib.request; port = os.environ.get('M365C_SERVER__PORT', '9365'); sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{port}/healthz', timeout=4).status == 200 else 1)"]
 
 ENTRYPOINT ["m365c"]
 CMD ["serve"]

@@ -1,0 +1,285 @@
+# promtool unit tests for rules/m365.yml:
+#   promtool test rules deploy/prometheus/tests/m365_test.yml
+# (run by tests/test_deploy.py through Docker when promtool is not installed)
+rule_files:
+  - ../rules/m365.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ------------------------------------------------------------------ licences
+  - interval: 1m
+    input_series:
+      - series: 'm365_threshold{customer="c",tenant="t",check="license_util_warn"}'
+        values: '0.95x120'
+      - series: 'm365_license_total{customer="c",tenant="t",sku="SPB"}'
+        values: '25x120'
+      - series: 'm365_license_consumed{customer="c",tenant="t",sku="SPB"}'
+        values: '24x120'
+      - series: 'm365_license_available{customer="c",tenant="t",sku="SPB"}'
+        values: '1x120'
+      - series: 'm365_license_total{customer="c",tenant="t",sku="FULL"}'
+        values: '5x120'
+      - series: 'm365_license_consumed{customer="c",tenant="t",sku="FULL"}'
+        values: '5x120'
+      - series: 'm365_license_available{customer="c",tenant="t",sku="FULL"}'
+        values: '0x120'
+      - series: 'm365_license_total{customer="c",tenant="t",sku="FREE"}'
+        values: '0x120'
+      - series: 'm365_license_available{customer="c",tenant="t",sku="FREE"}'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: M365LicenseNearlyExhausted
+        exp_alerts:
+          - exp_labels: {severity: warning, customer: c, tenant: t, sku: SPB}
+            exp_annotations:
+              summary: "c: licence SPB is 96% used"
+              description: "SKU SPB in tenant t is above the license_util_warn threshold."
+          - exp_labels: {severity: warning, customer: c, tenant: t, sku: FULL}
+            exp_annotations:
+              summary: "c: licence FULL is 100% used"
+              description: "SKU FULL in tenant t is above the license_util_warn threshold."
+      - eval_time: 90m
+        alertname: M365LicenseExhausted
+        exp_alerts:  # FREE (total 0) does not fire
+          - exp_labels: {severity: warning, customer: c, tenant: t, sku: FULL}
+            exp_annotations:
+              summary: "c: no FULL licences left (0 available)"
+              description: "SKU FULL in tenant t has no unassigned units."
+
+  # ------------------------------------------------------------------ storage
+  - interval: 1m
+    input_series:
+      - series: 'm365_threshold{customer="c",tenant="t",check="storage_used_warn"}'
+        values: '0.9x200'
+      - series: 'm365_mailbox_used_bytes{customer="c",tenant="t",upn="full@x"}'
+        values: '95x200'
+      - series: 'm365_mailbox_quota_bytes{customer="c",tenant="t",upn="full@x"}'
+        values: '100x200'
+      - series: 'm365_mailbox_used_bytes{customer="c",tenant="t",upn="ok@x"}'
+        values: '10x200'
+      - series: 'm365_mailbox_quota_bytes{customer="c",tenant="t",upn="ok@x"}'
+        values: '100x200'
+      - series: 'm365_onedrive_used_bytes{customer="c",tenant="t",upn="full@x"}'
+        values: '99x200'
+      - series: 'm365_onedrive_total_bytes{customer="c",tenant="t",upn="full@x"}'
+        values: '100x200'
+    alert_rule_test:
+      - eval_time: 150m
+        alertname: M365MailboxNearlyFull
+        exp_alerts:
+          - exp_labels: {severity: warning, customer: c, tenant: t, upn: full@x}
+            exp_annotations:
+              summary: "c: mailbox full@x is 95% full"
+              description: "Mailbox full@x in tenant t is above storage_used_warn of its Prohibit Send quota."
+      - eval_time: 150m
+        alertname: M365OneDriveNearlyFull
+        exp_alerts:
+          - exp_labels: {severity: warning, customer: c, tenant: t, upn: full@x}
+            exp_annotations:
+              summary: "c: OneDrive of full@x is 99% full"
+              description: "OneDrive of full@x in tenant t is above storage_used_warn."
+
+  # ------------------------------------------------------------------ users
+  # inactive_days = 1. Evaluated at 3d (time() = 259200).
+  - interval: 1m
+    input_series:
+      - series: 'm365_threshold{customer="c",tenant="t",check="inactive_days"}'
+        values: '1x4400'
+      - series: 'm365_tenant_feature{customer="c",tenant="t",feature="signin_activity"}'
+        values: '1x4400'
+      - series: 'm365_users_disabled_licensed{customer="c",tenant="t"}'
+        values: '2x4400'
+      # stale: last successful sign-in at t=0
+      - series: 'm365_user_info{customer="c",tenant="t",upn="old@x",display_name="Old",department="",enabled="true",licensed="true"}'
+        values: '1x4400'
+      - series: 'm365_user_last_signin_timestamp{customer="c",tenant="t",upn="old@x"}'
+        values: '0x4400'
+      # never signed in, account created at t=0  -> fires (review H4)
+      - series: 'm365_user_info{customer="c",tenant="t",upn="never@x",display_name="Never",department="",enabled="true",licensed="true"}'
+        values: '1x4400'
+      - series: 'm365_user_created_timestamp{customer="c",tenant="t",upn="never@x"}'
+        values: '0x4400'
+      # never signed in but created recently -> no alert
+      - series: 'm365_user_info{customer="c",tenant="t",upn="newbie@x",display_name="New",department="",enabled="true",licensed="true"}'
+        values: '1x4400'
+      - series: 'm365_user_created_timestamp{customer="c",tenant="t",upn="newbie@x"}'
+        values: '200000x4400'
+      # active -> no alert
+      - series: 'm365_user_info{customer="c",tenant="t",upn="fresh@x",display_name="Fresh",department="",enabled="true",licensed="true"}'
+        values: '1x4400'
+      - series: 'm365_user_last_signin_timestamp{customer="c",tenant="t",upn="fresh@x"}'
+        values: '0+60x4400'
+      # disabled -> no alert
+      - series: 'm365_user_info{customer="c",tenant="t",upn="gone@x",display_name="Gone",department="",enabled="false",licensed="true"}'
+        values: '1x4400'
+      - series: 'm365_user_last_signin_timestamp{customer="c",tenant="t",upn="gone@x"}'
+        values: '0x4400'
+      # tenant without signInActivity (no P1) -> never alerts
+      - series: 'm365_tenant_feature{customer="d",tenant="u",feature="signin_activity"}'
+        values: '0x4400'
+      - series: 'm365_threshold{customer="d",tenant="u",check="inactive_days"}'
+        values: '1x4400'
+      - series: 'm365_user_info{customer="d",tenant="u",upn="x@d",display_name="X",department="",enabled="true",licensed="true"}'
+        values: '1x4400'
+      - series: 'm365_user_created_timestamp{customer="d",tenant="u",upn="x@d"}'
+        values: '0x4400'
+    alert_rule_test:
+      - eval_time: 3d
+        alertname: M365UserInactive
+        exp_alerts:
+          - exp_labels: {severity: info, customer: c, tenant: t, upn: old@x, signin: stale}
+            exp_annotations:
+              summary: "c: old@x has not signed in for 3d 0h 0m 0s"
+              description: "Licensed, enabled user old@x in tenant t is past inactive_days. Consider removing the licence."
+          - exp_labels: {severity: info, customer: c, tenant: t, upn: never@x, signin: never}
+            exp_annotations:
+              summary: "c: never@x has never signed in (account created 3d 0h 0m 0s ago)"
+              description: "Licensed, enabled user never@x in tenant t is past inactive_days. Consider removing the licence."
+      - eval_time: 3d
+        alertname: M365DisabledUserLicensed
+        exp_alerts:
+          - exp_labels: {severity: warning, customer: c, tenant: t}
+            exp_annotations:
+              summary: "c: 2 disabled user(s) still hold licences"
+              description: "Tenant t pays for licences assigned to disabled accounts. See the dashboard for the list."
+
+  # ------------------------------------------------------------------ mail
+  - interval: 1m
+    input_series:
+      - series: 'm365_threshold{customer="c",tenant="t",check="mail_sent_max_7d"}'
+        values: '800x120'
+      - series: 'm365_threshold{customer="c",tenant="t",check="mail_received_max_7d"}'
+        values: '800x120'
+      - series: 'm365_mail_sent_7d{customer="c",tenant="t",upn="spam@x"}'
+        values: '900x120'
+      - series: 'm365_mail_received_7d{customer="c",tenant="t",upn="spam@x"}'
+        values: '10x120'
+      - series: 'm365_reports_concealed{customer="c",tenant="t",report="mailbox"}'
+        values: '1x120'
+      - series: 'm365_reports_concealed{customer="c",tenant="t",report="mailtraffic"}'
+        values: '1x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: M365HighMailTraffic
+        exp_alerts:
+          - exp_labels: {severity: warning, customer: c, tenant: t, upn: spam@x, direction: sent}
+            exp_annotations:
+              summary: "c: spam@x sent 900 mails in 7 days"
+              description: "Mail volume for spam@x in tenant t is above the sent threshold (possible compromise or bulk sending)."
+      - eval_time: 90m
+        alertname: M365ReportsConcealed
+        exp_alerts:  # one alert per tenant, not per report
+          - exp_labels: {severity: warning, customer: c, tenant: t}
+            exp_annotations:
+              summary: "c: usage reports conceal user names in t"
+              description: "Per-user mailbox and mail traffic metrics are skipped. In the M365 admin center: Settings > Org settings > Services > Reports, clear 'Display concealed user, group, and site names in all reports'."
+
+  # ------------------------------------------------------------------ tenant
+  # Evaluated at 2h (time() = 7200).
+  - interval: 1m
+    input_series:
+      - series: 'm365_service_status{customer="c",tenant="t",service="Teams",status="serviceDegradation"}'
+        values: '1x120'
+      - series: 'm365_service_status{customer="c",tenant="t",service="Exchange",status="ServiceInterruption"}'
+        values: '1x120'
+      - series: 'm365_service_status{customer="c",tenant="t",service="SharePoint",status="serviceOperational"}'
+        values: '1x120'
+      # expires in 10 days -> fires
+      - series: 'm365_app_credential_expiry_timestamp{customer="c",tenant="t",app="Payroll",app_id="a1",credential_type="password",key_id="k1"}'
+        values: '871200x120'
+      # expired long ago -> silent (review M10)
+      - series: 'm365_app_credential_expiry_timestamp{customer="c",tenant="t",app="Old",app_id="a2",credential_type="password",key_id="k2"}'
+        values: '0x120'
+      # expires in 60 days -> silent
+      - series: 'm365_app_credential_expiry_timestamp{customer="c",tenant="t",app="Fine",app_id="a3",credential_type="certificate",key_id="k3"}'
+        values: '5191200x120'
+      - series: 'm365_tenant_auth_ok{customer="c",tenant="t"}'
+        values: '0x120'
+      - series: 'm365_collector_permission_ok{customer="c",tenant="t",collector="securescore"}'
+        values: '0x120'
+      - series: 'm365_cert_expiry_timestamp{thumbprint="AB12"}'
+        values: '871200x120'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: M365ServiceDegraded
+        exp_alerts:
+          - exp_labels: {severity: warning, customer: c, tenant: t, service: Teams, status: serviceDegradation}
+            exp_annotations:
+              summary: "c: Teams is serviceDegradation"
+              description: "Microsoft reports Teams as serviceDegradation for tenant t."
+          - exp_labels: {severity: warning, customer: c, tenant: t, service: Exchange, status: ServiceInterruption}
+            exp_annotations:
+              summary: "c: Exchange is ServiceInterruption"
+              description: "Microsoft reports Exchange as ServiceInterruption for tenant t."
+      - eval_time: 2h
+        alertname: M365AppCredentialExpiring
+        exp_alerts:
+          - exp_labels: {severity: warning, customer: c, tenant: t, app: Payroll, app_id: a1, credential_type: password, key_id: k1}
+            exp_annotations:
+              summary: "c: password of app Payroll expires in 10d 0h 0m 0s"
+              description: "App Payroll (a1) credential k1 in tenant t expires within 30 days."
+      - eval_time: 2h
+        alertname: M365TenantAuthFailed
+        exp_alerts:
+          - exp_labels: {severity: critical, customer: c, tenant: t}
+            exp_annotations:
+              summary: "c: cannot authenticate to tenant t"
+              description: "Token request or Graph 401/403. Consent may be revoked or a permission missing. Run: m365c tenant verify c"
+      - eval_time: 2h
+        alertname: M365PermissionMissing
+        exp_alerts:
+          - exp_labels: {severity: warning, customer: c, tenant: t, collector: securescore}
+            exp_annotations:
+              summary: "c: collector securescore lacks a Graph permission in t"
+              description: "Graph answered 403 to securescore. Re-run the admin-consent URL, then: m365c tenant verify c"
+      - eval_time: 2h
+        alertname: M365CertificateExpiring
+        exp_alerts:
+          - exp_labels: {severity: critical, customer: netwatch, tenant: all, thumbprint: AB12}
+            exp_annotations:
+              summary: "m365c app certificate AB12 expires in 10d 0h 0m 0s"
+              description: "Rotate it (README: Certificate rotation). When it expires, every tenant fails to authenticate."
+
+  # ------------------------------------------------------------------ collector health
+  - interval: 1m
+    input_series:
+      - series: 'm365_collector_success{customer="c",tenant="t",collector="license"}'
+        values: '0x300'
+      - series: 'm365_collector_success{customer="c",tenant="t",collector="users"}'
+        values: '1x300'
+      # last success at t=0, interval 1h: stale after 2h
+      - series: 'm365_collector_last_success_timestamp{customer="c",tenant="t",collector="license"}'
+        values: '0x300'
+      - series: 'm365_collector_interval_seconds{customer="c",tenant="t",collector="license"}'
+        values: '3600x300'
+      # interval 24h: not stale at 4h
+      - series: 'm365_collector_last_success_timestamp{customer="c",tenant="t",collector="users"}'
+        values: '0x300'
+      - series: 'm365_collector_interval_seconds{customer="c",tenant="t",collector="users"}'
+        values: '86400x300'
+      - series: 'up{job="m365c",instance="collector:9365"}'
+        values: '1x60 0x240'
+    alert_rule_test:
+      - eval_time: 4h
+        alertname: M365CollectorFailing
+        exp_alerts:
+          - exp_labels: {severity: warning, customer: c, tenant: t, collector: license}
+            exp_annotations:
+              summary: "c: collector license failing for t"
+              description: "The last runs of license failed. Check the collector logs in Loki for tenant t."
+      - eval_time: 4h
+        alertname: M365CollectorStale
+        exp_alerts:
+          - exp_labels: {severity: warning, customer: c, tenant: t, collector: license}
+            exp_annotations:
+              summary: "c: license data for t is 4h 0m 0s old"
+              description: "No successful license run for more than twice its interval."
+      - eval_time: 4h
+        alertname: M365CollectorDown
+        exp_alerts:
+          - exp_labels: {severity: critical, customer: netwatch, tenant: all}
+            exp_annotations:
+              summary: "m365c collector is down or not scraped"
+              description: "Prometheus cannot scrape the m365c collector; all M365 data is stale."

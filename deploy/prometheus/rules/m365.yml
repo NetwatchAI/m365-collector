@@ -20,7 +20,8 @@ groups:
         expr: m365_license_available <= 0 and m365_license_total > 0
         for: 1h
         labels:
-          severity: critical
+          # Fully assigned SKUs are normal for many small clients: warn, don't page.
+          severity: warning
         annotations:
           summary: "{{ $labels.customer }}: no {{ $labels.sku }} licences left ({{ $value }} available)"
           description: "SKU {{ $labels.sku }} in tenant {{ $labels.tenant }} has no unassigned units."
@@ -63,20 +64,38 @@ groups:
           description: "Tenant {{ $labels.tenant }} pays for licences assigned to disabled accounts. See the dashboard for the list."
 
       - alert: M365UserInactive
+        # Licensed, enabled users whose last *successful* sign-in is older than
+        # inactive_days, or who never signed in and whose account is older than
+        # inactive_days. Only where signInActivity is available (Entra ID P1).
         expr: |
           (
-            (time() - m365_user_last_signin_timestamp)
-              > on(customer, tenant) group_left
-            (m365_threshold{check="inactive_days"} * 86400)
+            label_replace(
+              (time() - m365_user_last_signin_timestamp)
+                > on(customer, tenant) group_left()
+              (m365_threshold{check="inactive_days"} * 86400),
+              "signin", "stale", "", ""
+            )
+            or
+            label_replace(
+              (
+                (time() - m365_user_created_timestamp)
+                  > on(customer, tenant) group_left()
+                (m365_threshold{check="inactive_days"} * 86400)
+              )
+              unless on(customer, tenant, upn) m365_user_last_signin_timestamp,
+              "signin", "never", "", ""
+            )
           )
-          and on(customer, tenant, upn)
-          m365_user_info{enabled="true", licensed="true"}
+          and on(customer, tenant, upn) m365_user_info{enabled="true", licensed="true"}
+          and on(customer, tenant) (m365_tenant_feature{feature="signin_activity"} == 1)
         for: 1h
         labels:
           severity: info
         annotations:
-          summary: "{{ $labels.customer }}: {{ $labels.upn }} has not signed in for {{ $value | humanizeDuration }}"
-          description: "Licensed, enabled user {{ $labels.upn }} in tenant {{ $labels.tenant }} is past inactive_days."
+          summary: >-
+            {{ $labels.customer }}: {{ $labels.upn }}
+            {{ if eq $labels.signin "never" }}has never signed in (account created {{ $value | humanizeDuration }} ago){{ else }}has not signed in for {{ $value | humanizeDuration }}{{ end }}
+          description: "Licensed, enabled user {{ $labels.upn }} in tenant {{ $labels.tenant }} is past inactive_days. Consider removing the licence."
 
   - name: m365-mail
     rules:
@@ -111,7 +130,7 @@ groups:
     rules:
       - alert: M365ServiceDegraded
         expr: |
-          m365_service_status{status=~"serviceDegradation|serviceInterruption|extendedRecovery|restoringService|investigating|verifyingService"} == 1
+          m365_service_status{status=~"(?i)serviceDegradation|serviceInterruption|extendedRecovery|restoringService|investigating|verifyingService"} == 1
         for: 15m
         labels:
           severity: warning
@@ -120,13 +139,15 @@ groups:
           description: "Microsoft reports {{ $labels.service }} as {{ $labels.status }} for tenant {{ $labels.tenant }}."
 
       - alert: M365AppCredentialExpiring
-        expr: (m365_app_credential_expiry_timestamp - time()) < 30 * 86400
+        # Only credentials that have not expired yet: expired, never-removed secrets are
+        # common in client tenants and would otherwise alert for ever (see the dashboard).
+        expr: (m365_app_credential_expiry_timestamp - time()) < 30 * 86400 > 0
         for: 1h
         labels:
           severity: warning
         annotations:
           summary: "{{ $labels.customer }}: {{ $labels.credential_type }} of app {{ $labels.app }} expires in {{ $value | humanizeDuration }}"
-          description: "App {{ $labels.app }} ({{ $labels.app_id }}) credential {{ $labels.key_id }} in tenant {{ $labels.tenant }} expires within 30 days (negative = already expired)."
+          description: "App {{ $labels.app }} ({{ $labels.app_id }}) credential {{ $labels.key_id }} in tenant {{ $labels.tenant }} expires within 30 days."
 
       - alert: M365TenantAuthFailed
         expr: m365_tenant_auth_ok == 0
@@ -136,6 +157,15 @@ groups:
         annotations:
           summary: "{{ $labels.customer }}: cannot authenticate to tenant {{ $labels.tenant }}"
           description: "Token request or Graph 401/403. Consent may be revoked or a permission missing. Run: m365c tenant verify {{ $labels.customer }}"
+
+      - alert: M365PermissionMissing
+        expr: m365_collector_permission_ok == 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.customer }}: collector {{ $labels.collector }} lacks a Graph permission in {{ $labels.tenant }}"
+          description: "Graph answered 403 to {{ $labels.collector }}. Re-run the admin-consent URL, then: m365c tenant verify {{ $labels.customer }}"
 
   - name: m365-collector
     rules:
@@ -170,3 +200,14 @@ groups:
         annotations:
           summary: "m365c collector is down or not scraped"
           description: "Prometheus cannot scrape the m365c collector; all M365 data is stale."
+
+      - alert: M365CertificateExpiring
+        expr: (m365_cert_expiry_timestamp - time()) < 30 * 86400
+        for: 1h
+        labels:
+          severity: critical
+          customer: netwatch
+          tenant: all
+        annotations:
+          summary: "m365c app certificate {{ $labels.thumbprint }} expires in {{ $value | humanizeDuration }}"
+          description: "Rotate it (README: Certificate rotation). When it expires, every tenant fails to authenticate."
