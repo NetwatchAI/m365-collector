@@ -83,8 +83,12 @@ def scrape(registry: CollectorRegistry) -> dict[str, list[tuple[dict[str, str], 
     return out
 
 
+@pytest.mark.parametrize("license_role", ["Organization.Read.All", "LicenseAssignment.Read.All"])
 @pytest.mark.parametrize("signin", [True, False], ids=["with-signin", "without-signin-p1"])
-async def test_client_secret_tenant_with_parity_roles_only(tmp_path: Path, signin: bool) -> None:
+async def test_client_secret_tenant_with_parity_roles_only(
+    tmp_path: Path, signin: bool, license_role: str
+) -> None:
+    roles = [r for r in PARITY_ROLES if r != "Organization.Read.All"] + [license_role]
     secret = tmp_path / "contoso_client_secret"
     secret.write_text(FAKE_SECRET + "\n", encoding="utf-8")
     cfg_dir = tmp_path / "config"
@@ -92,8 +96,8 @@ async def test_client_secret_tenant_with_parity_roles_only(tmp_path: Path, signi
     collectors = all_collectors()
     cfg = load_all(cfg_dir, list(collectors))
 
-    identity = FakeIdentity(token_ok(PARITY_ROLES))
-    tokens = TenantTokenProvider(credential_kwargs={"transport": identity})
+    identity = FakeIdentity(token_ok(roles))
+    tokens = TenantTokenProvider(credential_kwargs={"transport": identity, "retry_total": 0})
     transport = fixture_transport(GRAPH_FIXTURES)
     graph = GraphClient(
         tokens, cfg.settings.http, transport=transport if signin else no_p1(transport)
@@ -132,7 +136,7 @@ async def test_client_secret_tenant_with_parity_roles_only(tmp_path: Path, signi
     assert success == dict.fromkeys(PARITY_COLLECTORS, 1.0)  # skipped ones absent: no alerts
     assert m["m365_tenant_auth_ok"] == [(base, 1.0)]
     granted = {x[0]["permission"] for x in m["m365_tenant_permission"] if x[1] == 1.0}
-    assert granted == set(PARITY_ROLES)
+    assert granted == set(roles)
 
     def has(name: str, **labels: str) -> bool:
         return any(all(x[0].get(k) == v for k, v in labels.items()) for x in m.get(name, []))

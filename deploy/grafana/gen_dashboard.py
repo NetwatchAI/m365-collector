@@ -215,7 +215,8 @@ table(
             ref="A",
         ),
         target(
-            f"m365_user_last_activity_timestamp{{{SEL}}} * 1000"
+            f"(m365_user_last_activity_timestamp{{{SEL}}}"
+            f" or on(customer, tenant, upn) m365_mailbox_last_activity_timestamp{{{SEL}}}) * 1000"
             f' and on(customer, tenant, upn) m365_user_info{{{SEL},enabled="false",licensed="true"}}',
             instant=True,
             fmt="table",
@@ -401,6 +402,82 @@ table(
     ],
     description="OneDrives at or above onedrive_size_gb_min. File count and last activity come "
     "from the usage report (onedrive.source: report, the default).",
+)
+y += 10
+# The "M365 mailbox inactivity audit" template: report Last Activity Date older than
+# inactive_days, plus mailboxes with no activity at all (the template counted a null date as
+# inactive). Uses the mailbox report only, so it works without Entra ID P1.
+MAILBOX_STALE = (
+    f"(time() - m365_mailbox_last_activity_timestamp{{{SEL}}}) / 86400"
+    f' > on(customer, tenant) group_left() m365_threshold{{{SEL},check="inactive_days"}}'
+)
+MAILBOX_NEVER = (
+    f"m365_mailbox_info{{{SEL}}} unless on(customer, tenant, upn)"
+    f" m365_mailbox_last_activity_timestamp{{{SEL}}}"
+)
+MAILBOX_INACTIVE = f"({MAILBOX_STALE}) or on(customer, tenant, upn) ({MAILBOX_NEVER})"
+table(
+    "Mailboxes inactive longer than inactive_days (mailbox report)",
+    [
+        target(MAILBOX_STALE, instant=True, fmt="table", ref="A"),
+        target(
+            f"m365_mailbox_used_bytes{{{SEL}}} and on(customer, tenant, upn) ({MAILBOX_INACTIVE})",
+            instant=True,
+            fmt="table",
+            ref="B",
+        ),
+        target(
+            f"m365_mailbox_info{{{SEL}}} and on(customer, tenant, upn) ({MAILBOX_INACTIVE})",
+            instant=True,
+            fmt="table",
+            ref="C",
+        ),
+    ],
+    0,
+    y,
+    18,
+    10,
+    organize={
+        **hide("Value #C"),
+        "renameByName": {
+            "Value #A": "days inactive",
+            "Value #B": "used",
+            "upn": "UPN",
+            "display_name": "display name",
+            "has_archive": "archive",
+        },
+    },
+    sort={"field": "days inactive", "desc": True},
+    overrides=[
+        unit_override("used", "bytes"),
+        {
+            "matcher": {"id": "byName", "options": "days inactive"},
+            "properties": [
+                {"id": "decimals", "value": 0},
+                {
+                    "id": "mappings",
+                    "value": [
+                        {
+                            "type": "special",
+                            "options": {"match": "null", "result": {"text": "never"}},
+                        }
+                    ],
+                },
+            ],
+        },
+    ],
+    description="Mailboxes whose report Last Activity Date is older than inactive_days "
+    "(thresholds.yaml), or that have no activity at all ('never'). Works without sign-in data.",
+)
+stat(
+    "Deleted mailboxes in the report",
+    f"sum by (tenant) (m365_mailbox_deleted{{{SEL}}})",
+    18,
+    y,
+    w=6,
+    h=10,
+    legend="{{tenant}}",
+    thresholds=BLUE,
 )
 y += 10
 
@@ -702,13 +779,45 @@ table(
     [target(f"m365_collector_skipped{{{SEL}}} == 1", instant=True, fmt="table")],
     0,
     y,
-    24,
-    6,
+    14,
+    8,
     organize={**hide("Value"), "renameByName": {"permission": "missing (any of, separated by |)"}},
     description="Grant the permission in the client's app registration (admin consent), then: "
-    "m365c tenant verify <customer>. Skipped collectors raise no alerts.",
+    "m365c tenant verify <customer>. Expected collectors that are skipped raise "
+    "M365CollectorSkipped.",
 )
-y += 6
+table(
+    "Graph permissions in the tenant's token",
+    [target(f"m365_tenant_permission{{{SEL}}}", instant=True, fmt="table")],
+    14,
+    y,
+    10,
+    8,
+    organize={**hide(), "renameByName": {"Value": "granted"}},
+    sort={"field": "granted", "desc": False},
+    overrides=[
+        {
+            "matcher": {"id": "byName", "options": "granted"},
+            "properties": [
+                {"id": "custom.cellOptions", "value": {"type": "color-background"}},
+                {
+                    "id": "mappings",
+                    "value": [
+                        {
+                            "type": "value",
+                            "options": {
+                                "1": {"text": "yes", "color": "green"},
+                                "0": {"text": "no", "color": "transparent"},
+                            },
+                        }
+                    ],
+                },
+            ],
+        }
+    ],
+    description="Roles m365c uses, from the tenant's current token (decoded locally).",
+)
+y += 8
 LOKI = {"type": "loki", "uid": "loki"}
 panels.append(
     {

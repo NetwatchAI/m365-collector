@@ -8,6 +8,7 @@ import logging
 import urllib.parse
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from prometheus_client import CollectorRegistry, generate_latest
@@ -34,11 +35,24 @@ FORMS = (
     urllib.parse.quote(FAKE_SECRET, safe=""),
     urllib.parse.quote_plus(FAKE_SECRET),
 )
-SCENARIOS = {
+
+
+def _no_token(form: dict[str, str]) -> tuple[int, dict[str, Any]]:
+    return 200, {"token_type": "Bearer", "echo": dict(form)}  # no access_token
+
+
+def _server_error_echo(form: dict[str, str]) -> tuple[int, dict[str, Any]]:
+    return 500, {"error": "server_error", "error_description": f"upstream failed: {form}"}
+
+
+SCENARIOS: dict[str, tuple[Any, str | None]] = {
     "success": (token_ok(), None),
     "invalid_client": (token_error(7000215), "invalid_client_secret"),
     "secret_expired": (token_error(7000222), "secret_expired"),
     "network_error": (None, None),
+    "no_access_token": (_no_token, None),
+    "server_error_echo": (_server_error_echo, None),
+    "invalid_request_echo": (token_error(90014, "invalid_request"), "auth_failed"),
 }
 
 
@@ -82,24 +96,30 @@ async def test_secret_never_leaks_from_service_paths(
         ),
     )
     identity = make_identity(scenario)
-    tokens = TenantTokenProvider(credential_kwargs={"transport": identity})
+    tokens = TenantTokenProvider(credential_kwargs={"transport": identity, "retry_total": 0})
     graph = GraphClient(
         tokens, HttpConfig(max_retries=0), transport=fixture_transport(GRAPH_FIXTURES)
     )
-    state = AppState(collectors=all_collectors(), cache=SnapshotCache())
+    cache_dir = secret_path.parent / "cache"
+    state = AppState(collectors=all_collectors(), cache=SnapshotCache(cache_dir))
     registry = CollectorRegistry()
     register(state, registry)
     scheduler = Scheduler(state, graph, settings)
     await scheduler.apply_tenants([tenant])
     try:
-        result = await scheduler.run_once(tenant, "license")
+        # Every parity collector, not just license, so all report and user paths are covered.
+        results = [
+            await scheduler.run_once(tenant, name)
+            for name in ("license", "mailbox", "users", "mailtraffic", "onedrive")
+        ]
+        result = results[0]
     finally:
         await scheduler.stop()
         await graph.aclose()
         await tokens.aclose()
 
     if scenario != "network_error":
-        assert identity.secrets_seen == [FAKE_SECRET]  # the secret really was in play
+        assert set(identity.secrets_seen) == {FAKE_SECRET}  # the secret really was in play
     metrics = generate_latest(registry).decode()
     expected_reason = SCENARIOS[scenario][1]
     if scenario == "success":
@@ -112,6 +132,10 @@ async def test_secret_never_leaks_from_service_paths(
     assert_clean(metrics)
     assert_clean(repr(resolve_auth(settings, tenant)))
     assert_clean(repr(tenant))
+    for r in results:
+        assert_clean(repr(r))
+    for cached in cache_dir.glob("*.json"):  # persisted snapshots (customer data on disk)
+        assert_clean(cached.read_text(encoding="utf-8"))
     captured = debug_logs.readouterr()
     assert_clean(captured.out + captured.err)
 
@@ -136,7 +160,9 @@ def test_secret_never_leaks_from_cli(
     monkeypatch.setattr(
         cli,
         "TenantTokenProvider",
-        lambda auths: TenantTokenProvider(auths, credential_kwargs={"transport": identity}),
+        lambda auths: TenantTokenProvider(
+            auths, credential_kwargs={"transport": identity, "retry_total": 0}
+        ),
     )
     monkeypatch.setattr(
         cli,
@@ -160,3 +186,33 @@ def test_secret_never_leaks_from_cli(
             assert result.exit_code == 1
             assert SCENARIOS[scenario][1] in result.output or "AADSTS" in result.output
     logging.getLogger().handlers.clear()
+
+
+def test_tenant_add_never_echoes_a_secret_in_any_option(cfg_dir_for_add: Path) -> None:
+    """A secret pasted into --client-id (easy when copying Zabbix macros side by side) or
+    into --client-secret-ref is refused without being echoed."""
+    runner = CliRunner()
+    for extra in (
+        ["--client-id", FAKE_SECRET, "--client-secret-ref", "env:X"],
+        ["--client-id", CLIENT, "--client-secret-ref", FAKE_SECRET],
+    ):
+        result = runner.invoke(
+            cli.app,
+            ["-c", str(cfg_dir_for_add), "tenant", "add", "--tenant-id", TENANT_ID,
+             "--name", "contoso.onmicrosoft.com", "--customer", "contoso",
+             "--auth", "client-secret", *extra],
+        )  # fmt: skip
+        assert result.exit_code == 2
+        assert_clean(result.output)
+        assert_clean((cfg_dir_for_add / "tenants.yaml").read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def cfg_dir_for_add(tmp_path: Path) -> Path:
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    (cfg / "settings.yaml").write_text(
+        "app:\n  client_id: 00000000-0000-0000-0000-000000000000\n", encoding="utf-8"
+    )
+    (cfg / "tenants.yaml").write_text("tenants: []\n", encoding="utf-8")
+    return cfg

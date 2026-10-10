@@ -1,10 +1,23 @@
-# Copy to tenants.yaml, or use `m365c tenant add`. Hot reloaded.
+# Copy to tenants.yaml, or use `m365c tenant add`. Hot reloaded. All IDs are fake.
 tenants:
-  - id: 11111111-1111-1111-1111-111111111111   # client tenant ID (fake)
+  # A client migrated from the Zabbix templates: its own app registration and client
+  # secret ({$MS.GRAPH.CLIENT.ID} / {$MS.GRAPH.CLIENT.SECRET}).
+  - id: 11111111-1111-1111-1111-111111111111   # client tenant ID ({$MS.GRAPH.TENANT.ID})
     name: contoso.onmicrosoft.com              # used as the `tenant` label
     customer: contoso                          # used as the `customer` label / thresholds key
-    collectors: all                            # or a list, e.g. [license, users]
+    auth:
+      method: client_secret
+      client_id: 33333333-3333-3333-3333-333333333333
+      # A secret REFERENCE (file:, env:, vault:, keyvault:); literal values are rejected.
+      client_secret: file:/run/m365c-secrets/contoso_client_secret
+      client_secret_expires: 2027-03-01        # from the app registration; drives an alert
+    # reports:
+    #   period: D30                            # {$MS.GRAPH.DAYS.BACK}; default settings reports.period
+    # onedrive:
+    #   source: report                         # report | quota | auto
+    collectors: all                            # every collector the token's permissions allow
     enabled: true
+  # A tenant on the shared Netwatch multi-tenant app (default auth from settings.yaml).
   - id: 22222222-2222-2222-2222-222222222222
     name: fabrikam.onmicrosoft.com
     customer: fabrikam

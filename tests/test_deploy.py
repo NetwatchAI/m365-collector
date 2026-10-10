@@ -21,7 +21,8 @@ REQUIRED_ALERTS = {
     "M365HighMailTraffic", "M365ServiceDegraded", "M365AppCredentialExpiring",
     "M365CollectorFailing", "M365CollectorStale", "M365TenantAuthFailed", "M365ReportsConcealed",
     "M365CollectorDown", "M365PermissionMissing", "M365CertificateExpiring",
-    "M365ClientSecretExpiring",
+    "M365ClientSecretExpiring", "M365CollectorSkipped", "M365PermissionRevoked",
+    "M365TenantCertificateExpiring",
 }  # fmt: skip
 
 
@@ -186,3 +187,15 @@ def test_dashboard_queries_parse(tmp_path: Path) -> None:
     (tmp_path / "dashboard.yml").write_text(yaml.safe_dump(rules), encoding="utf-8")
     out = _run_tool("promtool", PROMETHEUS_IMAGE, ["check", "rules", "/w/dashboard.yml"], tmp_path)
     assert "SUCCESS" in out
+
+
+def test_docker_proxy_is_isolated() -> None:
+    """Review 2 L12: only Alloy may reach the Docker API proxy."""
+    compose = yaml.safe_load((DEPLOY / "docker-compose.yml").read_text(encoding="utf-8"))
+    services = compose["services"]
+    assert services["docker-proxy"]["networks"] == ["docker-proxy"]
+    assert "docker-proxy" in services["alloy"]["networks"]
+    others = [n for n, svc in services.items() if n not in ("docker-proxy", "alloy")]
+    for name in others:
+        assert "docker-proxy" not in (services[name].get("networks") or []), name
+    assert compose["networks"]["docker-proxy"]["internal"] is True

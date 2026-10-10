@@ -39,7 +39,7 @@ receivers:
 inhibit_rules:
   # Auth failures explain collector failures for the same tenant.
   - source_matchers: [alertname="M365TenantAuthFailed"]
-    target_matchers: [alertname=~"M365CollectorFailing|M365CollectorStale|M365PermissionMissing"]
+    target_matchers: [alertname=~"M365CollectorFailing|M365CollectorStale|M365PermissionMissing|M365CollectorSkipped|M365PermissionRevoked"]
     equal: [customer, tenant]
   # Exhausted supersedes nearly exhausted for the same SKU.
   - source_matchers: [alertname="M365LicenseExhausted"]

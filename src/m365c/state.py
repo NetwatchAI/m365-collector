@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from m365c.auth import CertificateInfo
@@ -22,6 +23,8 @@ class AppState:
     intervals: dict[str, float] = field(default_factory=dict)
     config_loaded: bool = False
     certificate: CertificateInfo | None = None
+    # tenant_id -> certificate loaded for that tenant (set from the token provider).
+    tenant_certificates: Callable[[], dict[str, CertificateInfo]] = dict
 
     def active_tenants(self) -> list[TenantConfig]:
         return [t for t in self.tenants.values() if t.enabled]

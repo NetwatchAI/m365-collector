@@ -318,7 +318,6 @@ def tenant_add(
     try:
         settings = load_settings(c.config_dir)
         new = TenantConfig(id=tenant_id, name=name, customer=customer, auth=tenant_auth)
-        resolved = resolve_auth(settings, new)
     except ConfigError as exc:
         raise _fail(str(exc)) from None
     except ValidationError as exc:
@@ -334,6 +333,10 @@ def tenant_add(
     for t in existing:
         if t.id == new.id or t.name == new.name:
             raise _fail(f"tenant already configured: {t.name} ({t.id}), customer {t.customer}")
+    try:
+        resolved = resolve_auth(settings, new)
+    except ConfigError as exc:
+        raise _fail(str(exc)) from None
     try:
         path = write_tenants(c.config_dir, [*existing, new], known)
     except ConfigError as exc:

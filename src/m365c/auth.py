@@ -45,6 +45,13 @@ log = structlog.get_logger(__name__)
 
 GRAPH_SCOPE = "https://graph.microsoft.com/.default"
 RECHECK_S = 60.0
+# Identity-service errors that stay "transient" this long are reported as an auth failure
+# (e.g. an intercepting proxy answering instead of login.microsoftonline.com).
+TRANSIENT_GRACE_S = 1800.0
+NO_ROLES = (
+    "token carries no application permissions (roles claim missing or empty): admin consent "
+    "revoked or no Graph application permission granted"
+)
 
 # AADSTS code -> (reason label, description). Descriptions are fixed text: the identity
 # service's own error_description is never logged or re-raised, since it may echo request data.
@@ -273,6 +280,11 @@ class TokenProvider(Protocol):
 
 
 def roles_from_token(token: str) -> frozenset[str] | None:
+    """Application roles of a JWT; None if the token is not a JWT (gating disabled).
+
+    Entra omits the ``roles`` claim when no application permission is granted, so a missing
+    or empty claim yields an empty set: the providers treat that as an auth error.
+    """
     try:
         roles = decode_jwt_claims(token).get("roles")
     except ValueError:
@@ -294,6 +306,7 @@ class _Entry:
     last_token: str | None = None
     roles: frozenset[str] | None = None
     logged_error: str | None = None
+    transient_since: float | None = None
 
 
 class TenantTokenProvider:
@@ -342,11 +355,15 @@ class TenantTokenProvider:
         return {tid: e.auth.method for tid, e in self._entries.items()}
 
     def certificates(self) -> list[CertificateInfo]:
-        return [
-            e.material.certificate
-            for e in self._entries.values()
+        return list(self.tenant_certificates().values())
+
+    def tenant_certificates(self) -> dict[str, CertificateInfo]:
+        """tenant_id -> the certificate currently loaded for that tenant (certificate method)."""
+        return {
+            tid: e.material.certificate
+            for tid, e in self._entries.items()
             if e.material is not None and e.material.certificate is not None
-        ]
+        }
 
     async def _ready(self, tenant_id: str) -> tuple[_Entry, AsyncTokenCredential]:
         entry = self._entries.get(tenant_id)
@@ -392,7 +409,30 @@ class TenantTokenProvider:
                 if old is not None:
                     await old.close()
                     log.info("credential_rotated", tenant_id=tenant_id, method=auth.method)
-            return entry, entry.credential
+            credential = entry.credential
+        if self._entries.get(tenant_id) is not entry:
+            # configure() replaced or removed the entry while we were loading: nobody else
+            # will close this credential, so close it and use the current entry instead.
+            if entry.credential is not None:
+                entry.credential = None
+                await credential.close()
+            return await self._ready(tenant_id)
+        return entry, credential
+
+    def _transient(self, entry: _Entry, tenant_id: str, message: str) -> TokenError:
+        """A transient failure, escalated to ``identity_unreachable`` once it has lasted
+        :data:`TRANSIENT_GRACE_S`."""
+        now = self._clock()
+        if entry.transient_since is None:
+            entry.transient_since = now
+        if now - entry.transient_since >= TRANSIENT_GRACE_S:
+            return TokenError(
+                tenant_id,
+                f"identity service unreachable or answering unexpectedly for "
+                f"{int((now - entry.transient_since) // 60)} min ({message})",
+                reason="identity_unreachable",
+            )
+        return TokenError(tenant_id, message, transient=True)
 
     async def get_token(self, tenant_id: str) -> str:
         entry, cred = await self._ready(tenant_id)
@@ -400,16 +440,19 @@ class TenantTokenProvider:
             token = await cred.get_token(GRAPH_SCOPE)
         except ClientAuthenticationError as exc:
             reason, message, transient = classify_auth_failure(str(exc.message or ""))
-            if not transient:
-                entry.material = None  # re-read the secret next time: it may have been fixed
-            raise TokenError(tenant_id, message, transient=transient, reason=reason) from None
+            if transient:
+                raise self._transient(entry, tenant_id, message) from None
+            entry.transient_since = None
+            entry.material = None  # re-read the secret next time: it may have been fixed
+            raise TokenError(tenant_id, message, reason=reason) from None
         except AzureError as exc:  # network errors talking to login.microsoftonline.com
-            raise TokenError(tenant_id, type(exc).__name__, transient=True) from None
+            raise self._transient(entry, tenant_id, type(exc).__name__) from None
         except (ValueError, TypeError):  # unreadable key material
             entry.material = None
             raise TokenError(
                 tenant_id, f"unusable {entry.auth.method} credential", reason="invalid_credential"
             ) from None
+        entry.transient_since = None
         if token.token != entry.last_token:
             entry.last_token = token.token
             entry.roles = roles_from_token(token.token)
@@ -420,6 +463,8 @@ class TenantTokenProvider:
                 roles=len(entry.roles) if entry.roles is not None else None,
                 token_expires_at=datetime.fromtimestamp(token.expires_on, UTC).isoformat(),
             )
+        if entry.roles is not None and not entry.roles:
+            raise TokenError(tenant_id, NO_ROLES, reason="no_roles")
         return token.token
 
     async def forget(self, tenant_id: str) -> None:
@@ -445,6 +490,8 @@ class StaticTokenProvider:
         self.auths: dict[str, ResolvedAuth] = {}
 
     async def get_token(self, tenant_id: str) -> str:
+        if self._roles is not None and not self._roles:
+            raise TokenError(tenant_id, NO_ROLES, reason="no_roles")
         return self._token
 
     async def configure(self, auths: Mapping[str, ResolvedAuth]) -> None:

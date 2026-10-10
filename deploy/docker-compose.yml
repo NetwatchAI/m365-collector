@@ -112,6 +112,10 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     expose:
       - "2375"
+    # Only Alloy can reach the proxy: container inspect output includes other containers'
+    # environment, which no other service on the default network should be able to read.
+    networks:
+      - docker-proxy
 
   alloy:
     image: grafana/alloy:v1.10.0
@@ -127,6 +131,9 @@ services:
     depends_on:
       - loki
       - docker-proxy
+    networks:
+      - default        # to push to Loki
+      - docker-proxy   # to read container logs
 
 secrets:
   m365c_cert:
@@ -137,6 +144,11 @@ secrets:
     file: ./secrets/alertmanager_smtp_password
   alertmanager_webhook_contoso:
     file: ./secrets/alertmanager_webhook_contoso
+
+networks:
+  default:
+  docker-proxy:
+    internal: true     # no outbound traffic; Alloy is its only other member
 
 volumes:
   m365c-cache:

@@ -14,7 +14,7 @@ from prometheus_client.metrics_core import Metric
 from prometheus_client.registry import Collector
 
 from m365c import __version__
-from m365c.collectors import permissions
+from m365c.collectors import PARITY_COLLECTORS, permissions
 from m365c.health import FailureKind
 from m365c.state import AppState
 
@@ -40,6 +40,13 @@ BUILTIN_HELP: dict[str, str] = {
     ),
     "m365_collector_skipped": (
         "1 per missing permission group (alternatives joined by |) of a skipped collector"
+    ),
+    "m365_collector_expected": (
+        "1 if the tenant is expected to run the collector (explicit list, or a template-parity "
+        "collector under `collectors: all`)"
+    ),
+    "m365_tenant_cert_expiry_timestamp": (
+        "Unix time when the tenant's own certificate (auth.cert) expires"
     ),
     "m365_tenant_permission": (
         "1 if the tenant's token holds the Graph application role, 0 if not (roles m365c uses)"
@@ -143,8 +150,27 @@ class M365Exporter(Collector):
                 )
 
         known_permissions = permissions()
+        tenant_certs = state.tenant_certificates()
+        names = list(state.collectors)
         for tenant in state.active_tenants():
             base = {"customer": tenant.customer, "tenant": tenant.name}
+            # Which configured collectors the tenant is *expected* to run: an explicit list
+            # means all of them; `all` means the template-parity set. A skip of an expected
+            # collector is a loss of monitoring (M365CollectorSkipped).
+            for collector in tenant.enabled_collectors(names):
+                expected = tenant.collectors != "all" or collector in PARITY_COLLECTORS
+                out.add(
+                    "m365_collector_expected",
+                    {**base, "collector": collector},
+                    1.0 if expected else 0.0,
+                )
+            cert = tenant_certs.get(tenant.id)
+            if cert is not None and tenant.auth is not None and tenant.auth.cert is not None:
+                out.add(
+                    "m365_tenant_cert_expiry_timestamp",
+                    {**base, "thumbprint": cert.thumbprint},
+                    cert.not_after,
+                )
             roles = state.health.tenant_roles.get(tenant.id)
             if roles is not None:
                 for permission in known_permissions:
@@ -157,7 +183,7 @@ class M365Exporter(Collector):
             if auth_ok is not None:
                 out.add("m365_tenant_auth_ok", base, 1.0 if auth_ok else 0.0)
             if auth_ok is False:
-                reason = state.health.tenant_auth_reason.get(tenant.id, "unknown")
+                reason = state.health.auth_reason(tenant.id) or "unknown"
                 out.add("m365_tenant_auth_error", {**base, "reason": reason}, 1.0)
             auth = state.auth.get(tenant.id)
             if auth is not None and auth.client_secret_expires is not None:

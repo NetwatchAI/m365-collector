@@ -24,6 +24,8 @@ from m365c.config import (
 )
 
 KNOWN = list(all_collectors())
+# The example files as they were on main before per-tenant auth: they must keep working.
+LEGACY_EXAMPLES = Path(__file__).parent / "fixtures" / "legacy-config"
 EXAMPLES = Path(__file__).parents[1] / "config"
 CLIENT = "33333333-3333-3333-3333-333333333333"
 SETTINGS_CERT = """app:
@@ -55,7 +57,7 @@ def write_cfg(d: Path, settings: str, tenants: str) -> Path:
 def test_examples_load_unchanged_and_behave_as_before(tmp_path: Path) -> None:
     """Existing settings.yaml / tenants.yaml (no method, no tenant auth) keep working."""
     for name in ("settings", "tenants", "thresholds"):
-        shutil.copy(EXAMPLES / f"{name}.example.yaml", tmp_path / f"{name}.yaml")
+        shutil.copy(LEGACY_EXAMPLES / f"{name}.example.yaml", tmp_path / f"{name}.yaml")
     cfg = load_all(tmp_path, KNOWN)
     assert cfg.settings.app.method == "certificate"
     for tenant in cfg.tenants:
@@ -214,3 +216,15 @@ async def test_hot_reload_rejects_unresolvable_auth(tmp_path: Path) -> None:
     await watcher.check_once()
     await watcher.check_once()
     assert applied == []  # last good configuration stays
+
+
+def test_current_examples_show_the_parity_settings(tmp_path: Path) -> None:
+    for name in ("settings", "tenants", "thresholds"):
+        shutil.copy(EXAMPLES / f"{name}.example.yaml", tmp_path / f"{name}.yaml")
+    cfg = load_all(tmp_path, KNOWN)
+    assert cfg.settings.reports.period == "D7" and cfg.settings.onedrive.source == "report"
+    contoso = cfg.tenants[0]
+    assert resolve_auth(cfg.settings, contoso).method == "client_secret"
+    values = cfg.thresholds.resolve("contoso")
+    assert values["mailbox_size_gb_min"] == 10 and values["onedrive_size_gb_min"] == 1
+    assert values["mail_sent_max"] == 800

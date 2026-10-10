@@ -6,9 +6,11 @@ counters are ordinary prometheus_client Counters on the same registry.
 
 Auth is split in two signals:
 
-- tenant auth (``m365_tenant_auth_ok``): the most recent token request / Graph call of
-  *any* collector for the tenant. A token failure or Graph 401 sets it to 0; any
-  successful call sets it back to 1, so it recovers within one servicehealth cycle.
+- tenant auth (``m365_tenant_auth_ok``): 0 while the tenant has a definitive token failure
+  (tenant-wide: cleared by the next run of *any* collector that gets a token, so it recovers
+  quickly) or while *any* collector's last run got a Graph 401 (per collector: cleared only
+  by that collector's next run, so one collector's 401 cannot be hidden by another
+  collector's success).
 - collector permission (``m365_collector_permission_ok``): 0 while the collector's last
   run got a Graph 403 (a missing application permission or licence-gated feature).
 
@@ -87,22 +89,28 @@ class RunHealth:
 @dataclass
 class HealthState:
     runs: dict[tuple[str, str], RunHealth] = field(default_factory=dict)
+    # Tenants with at least one recorded outcome (auth_ok is None before that).
     tenant_auth: dict[str, bool] = field(default_factory=dict)
-    # Why the tenant's auth is failing (AADSTS mapping, "secret_unavailable", "unauthorized").
-    tenant_auth_reason: dict[str, str] = field(default_factory=dict)
+    # tenant_id -> reason of the current definitive token failure (AADSTS mapping,
+    # "secret_unavailable", "no_roles", "identity_unreachable", ...).
+    token_failures: dict[str, str] = field(default_factory=dict)
+    # (tenant_id, collector) -> reason, while that collector's last run got a Graph 401.
+    unauthorized: dict[tuple[str, str], str] = field(default_factory=dict)
     # Graph application roles in the tenant's current token, when it is a JWT.
     tenant_roles: dict[str, frozenset[str]] = field(default_factory=dict)
     # (tenant_id, collector) -> missing any-of permission groups, while skipped.
     skipped: dict[tuple[str, str], tuple[tuple[str, ...], ...]] = field(default_factory=dict)
     attempted_any: bool = False
 
-    def _auth_ok(self, tenant_id: str) -> None:
+    def _got_token(self, tenant_id: str, collector: str) -> None:
+        """The run obtained a token (and, unless skipped, Graph did not answer 401)."""
         self.tenant_auth[tenant_id] = True
-        self.tenant_auth_reason.pop(tenant_id, None)
+        self.token_failures.pop(tenant_id, None)
+        self.unauthorized.pop((tenant_id, collector), None)
 
     def record_success(self, tenant_id: str, collector: str, duration: float, samples: int) -> None:
         self.attempted_any = True
-        self._auth_ok(tenant_id)
+        self._got_token(tenant_id, collector)
         self.skipped.pop((tenant_id, collector), None)
         self.runs[(tenant_id, collector)] = RunHealth(
             success=True, duration_s=duration, samples=samples, last_success_ts=time.time()
@@ -114,7 +122,7 @@ class HealthState:
         """The collector was not run: the tenant's token lacks a required permission. Its
         run health is dropped, so neither CollectorFailing nor CollectorStale fires."""
         self.attempted_any = True
-        self._auth_ok(tenant_id)  # we got a token
+        self._got_token(tenant_id, collector)
         self.skipped[(tenant_id, collector)] = missing
         self.runs.pop((tenant_id, collector), None)
 
@@ -128,13 +136,21 @@ class HealthState:
         reason: str | None = None,
     ) -> None:
         self.attempted_any = True
-        if kind in (FailureKind.TOKEN, FailureKind.UNAUTHORIZED):
+        key = (tenant_id, collector)
+        if kind is FailureKind.TOKEN:
             self.tenant_auth[tenant_id] = False
-            self.tenant_auth_reason[tenant_id] = reason or kind.value
+            self.token_failures[tenant_id] = reason or kind.value
+        elif kind is FailureKind.UNAUTHORIZED:
+            self.tenant_auth[tenant_id] = False
+            self.unauthorized[key] = reason or kind.value
         elif kind is FailureKind.FORBIDDEN:
-            self._auth_ok(tenant_id)  # we got a token and Graph answered
-        self.skipped.pop((tenant_id, collector), None)
-        prev = self.runs.get((tenant_id, collector))
+            self._got_token(tenant_id, collector)  # we got a token and Graph answered
+        if key in self.skipped and kind in (FailureKind.TOKEN, FailureKind.TRANSIENT_TOKEN):
+            # No token, so no fresh verdict on permissions: a collector that was skipped
+            # stays skipped instead of showing a failed run it was never meant to make.
+            return
+        self.skipped.pop(key, None)
+        prev = self.runs.get(key)
         self.runs[(tenant_id, collector)] = RunHealth(
             success=False,
             duration_s=duration,
@@ -161,18 +177,31 @@ class HealthState:
         )
 
     def auth_ok(self, tenant_id: str) -> bool | None:
-        """Latest auth outcome for the tenant; None before any run."""
-        return self.tenant_auth.get(tenant_id)
+        """False while a token failure or any collector's 401 is unresolved; None before any
+        run."""
+        if tenant_id not in self.tenant_auth:
+            return None
+        if tenant_id in self.token_failures:
+            return False
+        return not any(k[0] == tenant_id for k in self.unauthorized)
+
+    def auth_reason(self, tenant_id: str) -> str | None:
+        if tenant_id in self.token_failures:
+            return self.token_failures[tenant_id]
+        return next((r for k, r in sorted(self.unauthorized.items()) if k[0] == tenant_id), None)
 
     def drop_tenant(self, tenant_id: str) -> None:
         for key in [k for k in self.runs if k[0] == tenant_id]:
             del self.runs[key]
         for key in [k for k in self.skipped if k[0] == tenant_id]:
             del self.skipped[key]
+        for key in [k for k in self.unauthorized if k[0] == tenant_id]:
+            del self.unauthorized[key]
         self.tenant_auth.pop(tenant_id, None)
-        self.tenant_auth_reason.pop(tenant_id, None)
+        self.token_failures.pop(tenant_id, None)
         self.tenant_roles.pop(tenant_id, None)
 
     def drop(self, tenant_id: str, collector: str) -> None:
         self.runs.pop((tenant_id, collector), None)
         self.skipped.pop((tenant_id, collector), None)
+        self.unauthorized.pop((tenant_id, collector), None)

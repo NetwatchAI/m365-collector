@@ -197,7 +197,7 @@ async def test_serve_client_secret_tenants_ignore_unusable_default_certificate(
     monkeypatch.setattr(
         main_module,
         "TenantTokenProvider",
-        lambda: TenantTokenProvider(credential_kwargs={"transport": identity}),
+        lambda: TenantTokenProvider(credential_kwargs={"transport": identity, "retry_total": 0}),
     )
     secret = tmp_path / "contoso_client_secret"
     secret.write_text(FAKE_SECRET, encoding="utf-8")

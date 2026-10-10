@@ -33,7 +33,9 @@ def secret_auth(path: Path, client_id: str = CLIENT) -> ResolvedAuth:
 def provider(
     auths: dict[str, ResolvedAuth], identity: FakeIdentity, **kwargs: object
 ) -> TenantTokenProvider:
-    return TenantTokenProvider(auths, credential_kwargs={"transport": identity}, **kwargs)  # type: ignore[arg-type]
+    return TenantTokenProvider(
+        auths, credential_kwargs={"transport": identity, "retry_total": 0}, **kwargs
+    )  # type: ignore[arg-type]
 
 
 async def test_client_secret_token_and_roles(tmp_path: Path) -> None:
@@ -222,7 +224,7 @@ async def test_scheduler_reports_secret_unavailable_then_recovers(tmp_path: Path
         id=TENANT_A, name="contoso.onmicrosoft.com", customer="contoso",
         auth=TenantAuth(method="client_secret", client_secret=f"file:{missing}"),
     )  # fmt: skip
-    tokens = TenantTokenProvider(credential_kwargs={"transport": FakeIdentity()})
+    tokens = TenantTokenProvider(credential_kwargs={"transport": FakeIdentity(), "retry_total": 0})
     graph = GraphClient(
         tokens, HttpConfig(max_retries=0), transport=fixture_transport(GRAPH_FIXTURES)
     )
@@ -232,11 +234,11 @@ async def test_scheduler_reports_secret_unavailable_then_recovers(tmp_path: Path
     try:
         assert not (await scheduler.run_once(tenant, "license")).ok
         assert state.health.auth_ok(TENANT_A) is False
-        assert state.health.tenant_auth_reason[TENANT_A] == "secret_unavailable"
+        assert state.health.auth_reason(TENANT_A) == "secret_unavailable"
         secret_file(tmp_path, name="later")
         assert (await scheduler.run_once(tenant, "license")).ok  # retried, no restart
         assert state.health.auth_ok(TENANT_A) is True
-        assert TENANT_A not in state.health.tenant_auth_reason
+        assert state.health.auth_reason(TENANT_A) is None
     finally:
         await scheduler.stop()
         await graph.aclose()

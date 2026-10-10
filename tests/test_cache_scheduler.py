@@ -101,19 +101,38 @@ async def test_403_is_a_permission_problem_not_auth(
     await denied.aclose()
 
 
-async def test_auth_failure_and_fast_recovery(app_state: AppState, tenant: TenantConfig) -> None:
+async def test_graph_401_is_per_collector(app_state: AppState, tenant: TenantConfig) -> None:
+    """Review 2 L10: another collector's success must not hide one collector's 401."""
     unauthorized = _error_graph(401, "InvalidAuthenticationToken")
     scheduler = Scheduler(app_state, unauthorized, settings())
     assert not (await scheduler.run_once(tenant, "appsecrets")).ok
     assert app_state.health.auth_ok(tenant.id) is False
 
+    good = make_fixture_graph()
+    scheduler = Scheduler(app_state, good, settings())
+    assert (await scheduler.run_once(tenant, "servicehealth")).ok
+    assert app_state.health.auth_ok(tenant.id) is False  # appsecrets still unresolved
+    assert app_state.health.auth_reason(tenant.id) == "unauthorized"
+    assert (await scheduler.run_once(tenant, "appsecrets")).ok
+    assert app_state.health.auth_ok(tenant.id) is True
+    await unauthorized.aclose()
+    await good.aclose()
+
+
+async def test_token_failure_recovers_on_any_collector(
+    app_state: AppState, tenant: TenantConfig
+) -> None:
+    failing = GraphClient(_FailingTokens(False), HttpConfig(max_retries=0))
+    scheduler = Scheduler(app_state, failing, settings())
+    assert not (await scheduler.run_once(tenant, "appsecrets")).ok
+    assert app_state.health.auth_ok(tenant.id) is False
     # Consent fixed: the next run of *any* collector (servicehealth every 5m) recovers it,
-    # without waiting for the daily appsecrets run.
+    # without waiting for the daily appsecrets run (token failures are tenant-wide).
     good = make_fixture_graph()
     scheduler = Scheduler(app_state, good, settings())
     assert (await scheduler.run_once(tenant, "servicehealth")).ok
     assert app_state.health.auth_ok(tenant.id) is True
-    await unauthorized.aclose()
+    await failing.aclose()
     await good.aclose()
 
 
@@ -123,6 +142,12 @@ class _FailingTokens:
 
     async def get_token(self, tenant_id: str) -> str:
         raise TokenError(tenant_id, "AADSTS700016: app not found", transient=self.transient)
+
+    async def configure(self, auths: object) -> None:
+        return None
+
+    def granted_roles(self, tenant_id: str) -> None:
+        return None
 
     async def aclose(self) -> None:
         return None

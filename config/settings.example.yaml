@@ -1,16 +1,29 @@
 # Copy to settings.yaml. Every value can be overridden with an M365C_ environment
 # variable, using "__" for nesting, e.g. M365C_HTTP__MAX_CONCURRENCY=10.
+# Default auth for tenants without their own `auth:` block in tenants.yaml.
 app:
+  method: certificate         # certificate | client_secret
   # The Netwatch multi-tenant app registration (Application (client) ID).
   client_id: 00000000-0000-0000-0000-000000000000
+  # With method: client_secret, a secret reference (never the value):
+  # client_secret: file:/run/m365c-secrets/default_client_secret
+  # client_secret_expires: 2027-03-01
 
 secrets:
-  # PEM with private key + certificate (or PKCS#12). Backends:
+  # Default certificate: PEM with private key + certificate (or PKCS#12). Only needed if a
+  # tenant uses certificate auth without its own auth.cert. Backends:
   #   file:/run/secrets/m365c_cert
+  #   env:M365C_CERT_PEM
   #   vault:secret/m365c/cert#pem                          (pip extra [vault])
   #   keyvault:https://<kv>.vault.azure.net/<secret-name>  (pip extra [azure])
   cert: file:/run/secrets/m365c_cert
   # cert_password: file:/run/secrets/m365c_cert_password  # only for encrypted keys / PFX
+
+reports:
+  period: D7                  # D7 | D30 | D90 | D180 ({$MS.GRAPH.DAYS.BACK}); per tenant too
+
+onedrive:
+  source: report              # report (Reports.Read.All) | quota (Files.Read.All) | auto
 
 http:
   max_concurrency: 20         # concurrent Graph requests, all tenants

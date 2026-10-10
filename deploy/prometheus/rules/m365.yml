@@ -3,9 +3,15 @@
 # Every alert carries `customer` and `tenant`.
 #
 # Collectors skipped for a missing Graph permission (m365_collector_enabled 0) export no
-# data and no success/last-success series, so the rules that read their metrics simply stay
-# quiet instead of firing CollectorFailing/CollectorStale. For the legacy client apps (the
-# four template-parity permissions) that means:
+# data and no success/last-success series, so CollectorFailing/CollectorStale don't fire for
+# them. Loss of monitoring is caught instead by:
+#   - M365CollectorSkipped     an *expected* collector (explicit `collectors:` entry, or a
+#                              template-parity collector under `collectors: all`) is skipped
+#   - M365PermissionRevoked    a Graph role that was in the tenant's token is gone
+#   - M365TenantAuthFailed     reason="no_roles": the token has no application roles at all
+#                              (consent revoked)
+# Rules over the data of collectors that are skipped *by design* stay quiet. For the legacy
+# client apps (the four template-parity permissions) that means:
 #   - M365ServiceDegraded       quiet (servicehealth needs ServiceHealth.Read.All)
 #   - M365AppCredentialExpiring quiet (appsecrets needs Application.Read.All); use
 #                               M365ClientSecretExpiring (auth.client_secret_expires) instead
@@ -188,9 +194,45 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "{{ $labels.customer }}: client secret of app {{ $labels.client_id }} for {{ $labels.tenant }} expires in {{ $value | humanizeDuration }}"
+          summary: "{{ $labels.customer }}: client secret of app {{ $labels.client_id }} for {{ $labels.tenant }} {{ if lt $value 0.0 }}has expired{{ else }}expires in {{ $value | humanizeDuration }}{{ end }}"
           description: "Create a new client secret in the client tenant's app registration, write it to the tenant's secret file (picked up without a restart), then update auth.client_secret_expires. After expiry, M365TenantAuthFailed fires with reason=\"secret_expired\"."
 
+
+      - alert: M365TenantCertificateExpiring
+        # A tenant's own certificate (auth.cert); the shared default certificate has
+        # M365CertificateExpiring.
+        expr: (m365_tenant_cert_expiry_timestamp - time()) < 30 * 86400
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.customer }}: certificate {{ $labels.thumbprint }} for {{ $labels.tenant }} {{ if lt $value 0.0 }}has expired{{ else }}expires in {{ $value | humanizeDuration }}{{ end }}"
+          description: "Upload a new certificate to the tenant's app registration, replace the auth.cert secret (picked up without a restart), then remove the old certificate."
+
+      - alert: M365CollectorSkipped
+        # Gating skips a collector whose permission is not in the token. For collectors the
+        # tenant is expected to run that is a loss of monitoring, not a configuration choice.
+        expr: |
+          max by (customer, tenant, collector, permission) (m365_collector_skipped == 1)
+            and on(customer, tenant, collector) (m365_collector_expected == 1)
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.customer }}: collector {{ $labels.collector }} is not running for {{ $labels.tenant }} (missing {{ $labels.permission }})"
+          description: "The tenant's token lacks {{ $labels.permission }} (alternatives separated by |), so {{ $labels.collector }} is skipped and its data is gone. Grant the application permission with admin consent, then: m365c tenant verify {{ $labels.customer }}"
+
+      - alert: M365PermissionRevoked
+        # A role that was granted during the last 7 days is no longer in the token.
+        expr: |
+          (m365_tenant_permission == 0)
+            and on(customer, tenant, permission) (max_over_time(m365_tenant_permission[7d]) == 1)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.customer }}: Graph permission {{ $labels.permission }} was removed from the app in {{ $labels.tenant }}"
+          description: "{{ $labels.permission }} was in the tenant's token and is no longer. Collectors that need it are skipped (see M365CollectorSkipped). Re-grant it with admin consent if the removal was not intended, then: m365c tenant verify {{ $labels.customer }}"
 
       - alert: M365PermissionMissing
         expr: m365_collector_permission_ok == 0

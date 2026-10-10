@@ -146,6 +146,9 @@ async def serve(
                 _log_certificate(info)
                 state.certificate = info
         tokens = TenantTokenProvider()
+    tenant_certificates = getattr(tokens, "tenant_certificates", None)
+    if callable(tenant_certificates):
+        state.tenant_certificates = tenant_certificates
 
     async with contextlib.AsyncExitStack() as stack:
         # Callbacks run in reverse order: this one runs last.

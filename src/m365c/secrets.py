@@ -59,6 +59,13 @@ class FileBackend:
             return path.read_bytes()
         except FileNotFoundError as exc:
             raise SecretError(f"file:{ref}: file not found") from exc
+        except PermissionError as exc:
+            uid = f"uid {os.getuid()}" if hasattr(os, "getuid") else "this process"
+            raise SecretError(
+                f"file:{ref}: permission denied: {uid} must be able to read the file and "
+                f"traverse every directory above it (e.g. directory 0750 with group 10001, "
+                f"file 0400 owned by 10001)"
+            ) from exc
         except OSError as exc:
             raise SecretError(f"file:{ref}: cannot read ({exc.strerror})") from exc
 

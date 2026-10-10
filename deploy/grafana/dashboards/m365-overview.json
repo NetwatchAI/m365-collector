@@ -380,7 +380,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "m365_user_last_activity_timestamp{customer=~\"$customer\",tenant=~\"$tenant\"} * 1000 and on(customer, tenant, upn) m365_user_info{customer=~\"$customer\",tenant=~\"$tenant\",enabled=\"false\",licensed=\"true\"}",
+          "expr": "(m365_user_last_activity_timestamp{customer=~\"$customer\",tenant=~\"$tenant\"} or on(customer, tenant, upn) m365_mailbox_last_activity_timestamp{customer=~\"$customer\",tenant=~\"$tenant\"}) * 1000 and on(customer, tenant, upn) m365_user_info{customer=~\"$customer\",tenant=~\"$tenant\",enabled=\"false\",licensed=\"true\"}",
           "refId": "B",
           "legendFormat": "",
           "instant": true,
@@ -898,22 +898,220 @@
       "description": "OneDrives at or above onedrive_size_gb_min. File count and last activity come from the usage report (onedrive.source: report, the default)."
     },
     {
+      "type": "table",
+      "title": "Mailboxes inactive longer than inactive_days (mailbox report)",
+      "id": 11,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 18,
+        "x": 0,
+        "y": 26
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(time() - m365_mailbox_last_activity_timestamp{customer=~\"$customer\",tenant=~\"$tenant\"}) / 86400 > on(customer, tenant) group_left() m365_threshold{customer=~\"$customer\",tenant=~\"$tenant\",check=\"inactive_days\"}",
+          "refId": "A",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "m365_mailbox_used_bytes{customer=~\"$customer\",tenant=~\"$tenant\"} and on(customer, tenant, upn) (((time() - m365_mailbox_last_activity_timestamp{customer=~\"$customer\",tenant=~\"$tenant\"}) / 86400 > on(customer, tenant) group_left() m365_threshold{customer=~\"$customer\",tenant=~\"$tenant\",check=\"inactive_days\"}) or on(customer, tenant, upn) (m365_mailbox_info{customer=~\"$customer\",tenant=~\"$tenant\"} unless on(customer, tenant, upn) m365_mailbox_last_activity_timestamp{customer=~\"$customer\",tenant=~\"$tenant\"}))",
+          "refId": "B",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "m365_mailbox_info{customer=~\"$customer\",tenant=~\"$tenant\"} and on(customer, tenant, upn) (((time() - m365_mailbox_last_activity_timestamp{customer=~\"$customer\",tenant=~\"$tenant\"}) / 86400 > on(customer, tenant) group_left() m365_threshold{customer=~\"$customer\",tenant=~\"$tenant\",check=\"inactive_days\"}) or on(customer, tenant, upn) (m365_mailbox_info{customer=~\"$customer\",tenant=~\"$tenant\"} unless on(customer, tenant, upn) m365_mailbox_last_activity_timestamp{customer=~\"$customer\",tenant=~\"$tenant\"}))",
+          "refId": "C",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true,
+              "Value #C": true
+            },
+            "renameByName": {
+              "Value #A": "days inactive",
+              "Value #B": "used",
+              "upn": "UPN",
+              "display_name": "display name",
+              "has_archive": "archive"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "days inactive",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "used"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "days inactive"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "special",
+                    "options": {
+                      "match": "null",
+                      "result": {
+                        "text": "never"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "description": "Mailboxes whose report Last Activity Date is older than inactive_days (thresholds.yaml), or that have no activity at all ('never'). Works without sign-in data."
+    },
+    {
+      "type": "stat",
+      "title": "Deleted mailboxes in the report",
+      "id": 12,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 6,
+        "x": 18,
+        "y": 26
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (tenant) (m365_mailbox_deleted{customer=~\"$customer\",tenant=~\"$tenant\"})",
+          "refId": "A",
+          "legendFormat": "{{tenant}}",
+          "instant": true,
+          "range": false,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false,
+          "fields": ""
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
       "type": "row",
       "title": "Licences",
-      "id": 11,
+      "id": 13,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 26
+        "y": 36
       },
       "panels": []
     },
     {
       "type": "bargauge",
       "title": "Licence utilisation per SKU",
-      "id": 12,
+      "id": 14,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -922,7 +1120,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 27
+        "y": 37
       },
       "targets": [
         {
@@ -979,7 +1177,7 @@
     {
       "type": "table",
       "title": "Licences",
-      "id": 13,
+      "id": 15,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -988,7 +1186,7 @@
         "h": 10,
         "w": 12,
         "x": 12,
-        "y": 27
+        "y": 37
       },
       "targets": [
         {
@@ -1078,20 +1276,20 @@
     {
       "type": "row",
       "title": "Storage",
-      "id": 14,
+      "id": 16,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 37
+        "y": 47
       },
       "panels": []
     },
     {
       "type": "bargauge",
       "title": "Top 10 mailboxes by % used",
-      "id": 15,
+      "id": 17,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1100,7 +1298,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 38
+        "y": 48
       },
       "targets": [
         {
@@ -1157,7 +1355,7 @@
     {
       "type": "bargauge",
       "title": "Top 10 OneDrives by % used",
-      "id": 16,
+      "id": 18,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1166,7 +1364,7 @@
         "h": 10,
         "w": 12,
         "x": 12,
-        "y": 38
+        "y": 48
       },
       "targets": [
         {
@@ -1223,20 +1421,20 @@
     {
       "type": "row",
       "title": "Users",
-      "id": 17,
+      "id": 19,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 48
+        "y": 58
       },
       "panels": []
     },
     {
       "type": "table",
       "title": "Disabled users with licences",
-      "id": 18,
+      "id": 20,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1245,7 +1443,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 49
+        "y": 59
       },
       "targets": [
         {
@@ -1294,7 +1492,7 @@
     {
       "type": "table",
       "title": "Inactive licensed users (days since last sign-in)",
-      "id": 19,
+      "id": 21,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1303,7 +1501,7 @@
         "h": 10,
         "w": 12,
         "x": 12,
-        "y": 49
+        "y": 59
       },
       "targets": [
         {
@@ -1363,7 +1561,7 @@
     {
       "type": "table",
       "title": "Licensed users who never signed in (days since account creation)",
-      "id": 20,
+      "id": 22,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1372,7 +1570,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 59
+        "y": 69
       },
       "targets": [
         {
@@ -1432,20 +1630,20 @@
     {
       "type": "row",
       "title": "Mail",
-      "id": 21,
+      "id": 23,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 67
+        "y": 77
       },
       "panels": []
     },
     {
       "type": "bargauge",
       "title": "Top 10 senders (report period)",
-      "id": 22,
+      "id": 24,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1454,7 +1652,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 68
+        "y": 78
       },
       "targets": [
         {
@@ -1502,7 +1700,7 @@
     {
       "type": "bargauge",
       "title": "Top 10 receivers (report period)",
-      "id": 23,
+      "id": 25,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1511,7 +1709,7 @@
         "h": 10,
         "w": 12,
         "x": 12,
-        "y": 68
+        "y": 78
       },
       "targets": [
         {
@@ -1559,20 +1757,20 @@
     {
       "type": "row",
       "title": "Tenant health",
-      "id": 24,
+      "id": 26,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 78
+        "y": 88
       },
       "panels": []
     },
     {
       "type": "table",
       "title": "Service health",
-      "id": 25,
+      "id": 27,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1581,7 +1779,7 @@
         "h": 10,
         "w": 8,
         "x": 0,
-        "y": 79
+        "y": 89
       },
       "targets": [
         {
@@ -1667,7 +1865,7 @@
     {
       "type": "timeseries",
       "title": "Secure score",
-      "id": 26,
+      "id": 28,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1676,7 +1874,7 @@
         "h": 10,
         "w": 8,
         "x": 8,
-        "y": 79
+        "y": 89
       },
       "targets": [
         {
@@ -1714,7 +1912,7 @@
     {
       "type": "table",
       "title": "App credentials expiring within 60 days (negative = expired)",
-      "id": 27,
+      "id": 29,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1723,7 +1921,7 @@
         "h": 10,
         "w": 8,
         "x": 16,
-        "y": 79
+        "y": 89
       },
       "targets": [
         {
@@ -1783,20 +1981,20 @@
     {
       "type": "row",
       "title": "Collector health",
-      "id": 28,
+      "id": 30,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 89
+        "y": 99
       },
       "panels": []
     },
     {
       "type": "table",
       "title": "Collectors",
-      "id": 29,
+      "id": 31,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1805,7 +2003,7 @@
         "h": 10,
         "w": 14,
         "x": 0,
-        "y": 90
+        "y": 100
       },
       "targets": [
         {
@@ -1999,7 +2197,7 @@
     {
       "type": "timeseries",
       "title": "Graph requests / throttling",
-      "id": 30,
+      "id": 32,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -2008,7 +2206,7 @@
         "h": 10,
         "w": 10,
         "x": 14,
-        "y": 90
+        "y": 100
       },
       "targets": [
         {
@@ -2046,16 +2244,16 @@
     {
       "type": "table",
       "title": "Collectors skipped for a missing Graph permission",
-      "id": 31,
+      "id": 33,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
       "gridPos": {
-        "h": 6,
-        "w": 24,
+        "h": 8,
+        "w": 14,
         "x": 0,
-        "y": 100
+        "y": 110
       },
       "targets": [
         {
@@ -2101,12 +2299,115 @@
         },
         "overrides": []
       },
-      "description": "Grant the permission in the client's app registration (admin consent), then: m365c tenant verify <customer>. Skipped collectors raise no alerts."
+      "description": "Grant the permission in the client's app registration (admin consent), then: m365c tenant verify <customer>. Expected collectors that are skipped raise M365CollectorSkipped."
+    },
+    {
+      "type": "table",
+      "title": "Graph permissions in the tenant's token",
+      "id": 34,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 10,
+        "x": 14,
+        "y": 110
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "m365_tenant_permission{customer=~\"$customer\",tenant=~\"$tenant\"}",
+          "refId": "A",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true
+            },
+            "renameByName": {
+              "Value": "granted"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "granted",
+                "desc": false
+              }
+            ]
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "granted"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "yes",
+                        "color": "green"
+                      },
+                      "0": {
+                        "text": "no",
+                        "color": "transparent"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "description": "Roles m365c uses, from the tenant's current token (decoded locally)."
     },
     {
       "type": "logs",
       "title": "Collector logs (warnings and errors)",
-      "id": 32,
+      "id": 35,
       "datasource": {
         "type": "loki",
         "uid": "loki"
@@ -2115,7 +2416,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 106
+        "y": 118
       },
       "targets": [
         {

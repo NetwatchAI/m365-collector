@@ -214,6 +214,14 @@ tests:
         values: '871200x120'
       - series: 'm365_client_secret_expiry_timestamp{customer="c",tenant="ok",client_id="cid2"}'
         values: '5191200x120'
+      # already expired 1 h ago at eval time -> fires, worded as expired
+      - series: 'm365_client_secret_expiry_timestamp{customer="c",tenant="old",client_id="cid3"}'
+        values: '3600x120'
+      # tenant certificate: expires in 10 days -> fires; in 60 days -> silent
+      - series: 'm365_tenant_cert_expiry_timestamp{customer="c",tenant="t",thumbprint="CD34"}'
+        values: '871200x120'
+      - series: 'm365_tenant_cert_expiry_timestamp{customer="c",tenant="ok",thumbprint="EF56"}'
+        values: '5191200x120'
       - series: 'm365_collector_permission_ok{customer="c",tenant="t",collector="securescore"}'
         values: '0x120'
       - series: 'm365_cert_expiry_timestamp{thumbprint="AB12"}'
@@ -251,6 +259,10 @@ tests:
       - eval_time: 2h
         alertname: M365ClientSecretExpiring
         exp_alerts:
+          - exp_labels: {severity: warning, customer: c, tenant: old, client_id: cid3}
+            exp_annotations:
+              summary: "c: client secret of app cid3 for old has expired"
+              description: "Create a new client secret in the client tenant's app registration, write it to the tenant's secret file (picked up without a restart), then update auth.client_secret_expires. After expiry, M365TenantAuthFailed fires with reason=\"secret_expired\"."
           - exp_labels: {severity: warning, customer: c, tenant: t, client_id: cid1}
             exp_annotations:
               summary: "c: client secret of app cid1 for t expires in 10d 0h 0m 0s"
@@ -270,6 +282,53 @@ tests:
             exp_annotations:
               summary: "m365c app certificate AB12 expires in 10d 0h 0m 0s"
               description: "Rotate it (README: Certificate rotation). When it expires, every tenant fails to authenticate."
+
+  # ------------------------------------------------------------------ gating (review 2 H1)
+  # Evaluated at 3h. Reports.Read.All was granted, then removed at 1h.
+  - interval: 1m
+    input_series:
+      - series: 'm365_tenant_permission{customer="c",tenant="t",permission="Reports.Read.All"}'
+        values: '1x60 0x120'
+      # never granted: no "revoked" alert
+      - series: 'm365_tenant_permission{customer="c",tenant="t",permission="ServiceHealth.Read.All"}'
+        values: '0x180'
+      # expected parity collector skipped -> fires
+      - series: 'm365_collector_skipped{customer="c",tenant="t",collector="mailbox",reason="missing_permission",permission="Reports.Read.All"}'
+        values: '_x60 1x120'
+      - series: 'm365_collector_expected{customer="c",tenant="t",collector="mailbox"}'
+        values: '1x180'
+      # skipped by design (not expected under collectors: all) -> silent
+      - series: 'm365_collector_skipped{customer="c",tenant="t",collector="servicehealth",reason="missing_permission",permission="ServiceHealth.Read.All"}'
+        values: '1x180'
+      - series: 'm365_collector_expected{customer="c",tenant="t",collector="servicehealth"}'
+        values: '0x180'
+      - series: 'm365_tenant_cert_expiry_timestamp{customer="c",tenant="t",thumbprint="CD34"}'
+        values: '874800x180'
+    alert_rule_test:
+      - eval_time: 3h
+        alertname: M365CollectorSkipped
+        exp_alerts:
+          - exp_labels: {severity: warning, customer: c, tenant: t, collector: mailbox, permission: Reports.Read.All}
+            exp_annotations:
+              summary: "c: collector mailbox is not running for t (missing Reports.Read.All)"
+              description: "The tenant's token lacks Reports.Read.All (alternatives separated by |), so mailbox is skipped and its data is gone. Grant the application permission with admin consent, then: m365c tenant verify c"
+      - eval_time: 3h
+        alertname: M365PermissionRevoked
+        exp_alerts:
+          - exp_labels: {severity: warning, customer: c, tenant: t, permission: Reports.Read.All}
+            exp_annotations:
+              summary: "c: Graph permission Reports.Read.All was removed from the app in t"
+              description: "Reports.Read.All was in the tenant's token and is no longer. Collectors that need it are skipped (see M365CollectorSkipped). Re-grant it with admin consent if the removal was not intended, then: m365c tenant verify c"
+      - eval_time: 3h
+        alertname: M365TenantCertificateExpiring
+        exp_alerts:
+          - exp_labels: {severity: warning, customer: c, tenant: t, thumbprint: CD34}
+            exp_annotations:
+              summary: "c: certificate CD34 for t expires in 10d 0h 0m 0s"
+              description: "Upload a new certificate to the tenant's app registration, replace the auth.cert secret (picked up without a restart), then remove the old certificate."
+      - eval_time: 50m
+        alertname: M365PermissionRevoked
+        exp_alerts: []
 
   # ------------------------------------------------------------------ collector health
   - interval: 1m

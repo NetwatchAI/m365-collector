@@ -79,7 +79,8 @@ def _validate_guid(value: str) -> str:
     try:
         return str(uuid.UUID(str(value)))
     except ValueError as exc:
-        raise ValueError(f"{value!r} is not a GUID") from exc
+        # The value is not echoed: a client secret pasted into client_id must not leak.
+        raise ValueError("not a GUID (expected xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)") from exc
 
 
 Guid = Annotated[str, BeforeValidator(_validate_guid)]

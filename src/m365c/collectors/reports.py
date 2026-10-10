@@ -36,11 +36,15 @@ CONCEALED_HELP = {
     "m365_reports_concealed": (
         "1 if the tenant conceals user names in usage reports (per-user report series skipped)"
     ),
+    "m365_report_rows_skipped": (
+        "Report rows not exported because the UPN is not a real address (hashed or empty)"
+    ),
 }
 UPN = "User Principal Name"
 
 _WARNED = "concealed_warned"
 _FORBIDDEN_WARNED = "report_settings_forbidden_warned"
+_SKIPPED_WARNED = "rows_skipped_warned"
 _HEX32 = re.compile(r"^[0-9A-Fa-f]{32}$")
 _HINT = (
     "Usage reports show concealed user names, so per-user report metrics are skipped. In "
@@ -136,4 +140,19 @@ async def report_rows(
     if looks_concealed(rows, column):
         warn_concealed(ctx, "report data")
         return [concealed_sample(True, report, "heuristic")], []
-    return [concealed_sample(False, report, source)], rows
+    # Rows (not deleted) whose UPN is not an address are never exported: count them, so a
+    # partially hashed report does not make users vanish without a trace.
+    skipped = sum(
+        1 for row in rows if not to_bool(row.get("Is Deleted")) and "@" not in _upn(row, column)
+    )
+    if skipped and not ctx.state.get(_SKIPPED_WARNED):
+        ctx.log.warning("report_rows_skipped", report=report, rows=skipped, reason="no_upn")
+        ctx.state[_SKIPPED_WARNED] = True
+    elif not skipped:
+        ctx.state.pop(_SKIPPED_WARNED, None)
+    return [
+        concealed_sample(False, report, source),
+        MetricSample(
+            "m365_report_rows_skipped", float(skipped), {"report": report, "reason": "no_upn"}
+        ),
+    ], rows

@@ -172,15 +172,16 @@ class OneDriveCollector(BaseCollector):
 
         if targets and len(denied) == len(targets):
             raise denied[0]  # every drive refused: permission problem, not a per-user quirk
-        failed = len(denied) + len(errors)
-        if targets and failed / len(targets) > MAX_ERROR_RATIO:
-            first = (errors or denied)[0]
+        # Per-drive 403s (e.g. a OneDrive the app may not open) are expected quirks, not
+        # failures: they are logged but only errors count toward the failure ratio.
+        if targets and len(errors) / len(targets) > MAX_ERROR_RATIO:
+            first = errors[0]
             raise GraphError(
                 first.status,
                 first.code,
-                f"{failed} of {len(targets)} drives failed (first: {first.message})",
+                f"{len(errors)} of {len(targets)} drives failed (first: {first.message})",
             )
-        if failed:
+        if denied or errors:
             ctx.log.warning(
                 "onedrive_partial_failure",
                 users=len(targets),
