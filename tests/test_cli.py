@@ -201,3 +201,80 @@ def test_verify_with_bad_certificate_is_a_clean_error(cfg_dir: Path, tmp_path: P
     code, output = invoke("-c", str(cfg_dir), "tenant", "verify", "contoso")
     assert code == 2, output
     assert "certificate unusable" in output and "Traceback" not in output
+
+
+def test_tenant_add_with_client_secret_auth(cfg_dir: Path) -> None:
+    code, output = invoke(
+        "-c", str(cfg_dir), "tenant", "add",
+        "--tenant-id", "22222222-2222-2222-2222-222222222222",
+        "--name", "fabrikam.onmicrosoft.com", "--customer", "fabrikam",
+        "--auth", "client-secret", "--client-id", "33333333-3333-3333-3333-333333333333",
+        "--client-secret-ref", "file:/run/m365c-secrets/fabrikam_client_secret",
+        "--client-secret-expires", "2027-03-01",
+    )  # fmt: skip
+    assert code == 0, output
+    assert "auth client_secret" in output
+    assert "client_id=33333333-3333-3333-3333-333333333333" in output.replace("\n", "")
+    data = yaml.safe_load((cfg_dir / "tenants.yaml").read_text(encoding="utf-8"))
+    assert data["tenants"][1]["auth"] == {
+        "method": "client_secret",
+        "client_id": "33333333-3333-3333-3333-333333333333",
+        "client_secret": "file:/run/m365c-secrets/fabrikam_client_secret",
+        "client_secret_expires": "2027-03-01",
+    }
+    code, output = invoke("-c", str(cfg_dir), "tenant", "list")
+    assert code == 0 and "client_secret" in output and "default" in output
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--auth", "client-secret", "--client-id", "33333333-3333-3333-3333-333333333333",
+         "--client-secret-ref", "Zq8~LiteralSecretValue.123"],
+        ["--auth", "client-secret", "--client-id", "33333333-3333-3333-3333-333333333333",
+         "--client-secret-ref", "plain:Zq8~LiteralSecretValue.123"],
+    ],
+)  # fmt: skip
+def test_tenant_add_refuses_literal_secrets(cfg_dir: Path, args: list[str]) -> None:
+    before = (cfg_dir / "tenants.yaml").read_bytes()
+    code, output = invoke(
+        "-c", str(cfg_dir), "tenant", "add",
+        "--tenant-id", "22222222-2222-2222-2222-222222222222",
+        "--name", "fabrikam.onmicrosoft.com", "--customer", "fabrikam", *args,
+    )  # fmt: skip
+    assert code == 2
+    assert "not a secret reference" in output
+    assert "LiteralSecretValue" not in output
+    assert (cfg_dir / "tenants.yaml").read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("args", "fragment"),
+    [
+        (["--auth", "client-secret"], "needs --client-id and --client-secret-ref"),
+        (["--client-secret-ref", "env:X"], "need --auth"),
+        (["--auth", "certificate", "--client-secret-ref", "env:X"], "only valid with --auth client-secret"),
+    ],
+)  # fmt: skip
+def test_tenant_add_auth_option_errors(cfg_dir: Path, args: list[str], fragment: str) -> None:
+    code, output = invoke(
+        "-c", str(cfg_dir), "tenant", "add",
+        "--tenant-id", "22222222-2222-2222-2222-222222222222",
+        "--name", "fabrikam.onmicrosoft.com", "--customer", "fabrikam", *args,
+    )  # fmt: skip
+    assert code == 2 and fragment in output.replace("\n", "")
+
+
+def test_tenant_add_with_own_certificate(cfg_dir: Path) -> None:
+    code, output = invoke(
+        "-c", str(cfg_dir), "tenant", "add",
+        "--tenant-id", "22222222-2222-2222-2222-222222222222",
+        "--name", "fabrikam.onmicrosoft.com", "--customer", "fabrikam",
+        "--auth", "certificate", "--cert-ref", "vault:secret/fabrikam/cert#pem",
+    )  # fmt: skip
+    assert code == 0, output
+    data = yaml.safe_load((cfg_dir / "tenants.yaml").read_text(encoding="utf-8"))
+    assert data["tenants"][1]["auth"] == {
+        "method": "certificate",
+        "cert": "vault:secret/fabrikam/cert#pem",
+    }

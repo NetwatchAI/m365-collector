@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import enum
 import io
 import json
 import sys
@@ -38,6 +39,7 @@ from m365c.config import (
     TENANTS_FILE,
     ConfigError,
     Settings,
+    TenantAuth,
     TenantConfig,
     load_all,
     load_settings,
@@ -223,11 +225,55 @@ def tenant_list(ctx: typer.Context) -> None:
         tenants = load_tenants(c.config_dir, list(all_collectors()))
     except ConfigError as exc:
         raise _fail(str(exc)) from None
-    table = Table("customer", "tenant", "tenant id", "collectors", "enabled")
+    table = Table("customer", "tenant", "tenant id", "auth", "collectors", "enabled")
     for t in tenants:
         collectors = t.collectors if isinstance(t.collectors, str) else ", ".join(t.collectors)
-        table.add_row(t.customer, t.name, t.id, collectors, OK if t.enabled else FAIL)
+        auth = t.auth.method if t.auth is not None else "default"
+        table.add_row(t.customer, t.name, t.id, auth, collectors, OK if t.enabled else FAIL)
     out.print(table)
+
+
+class AuthChoice(enum.StrEnum):
+    client_secret = "client-secret"
+    certificate = "certificate"
+
+
+def _tenant_auth(
+    auth: AuthChoice | None,
+    client_id: str | None,
+    client_secret_ref: str | None,
+    client_secret_expires: str | None,
+    cert_ref: str | None,
+    cert_password_ref: str | None,
+) -> TenantAuth | None:
+    """Build the tenant's auth block from the options; references only, never values."""
+    secret_opts = client_secret_ref or client_secret_expires
+    cert_opts = cert_ref or cert_password_ref
+    if auth is None:
+        if client_id or secret_opts or cert_opts:
+            raise _fail("--client-id/--client-secret-ref/--cert-ref need --auth")
+        return None  # use the settings.yaml default
+    if auth is AuthChoice.client_secret:
+        if not client_id or not client_secret_ref:
+            raise _fail("--auth client-secret needs --client-id and --client-secret-ref")
+        if cert_opts:
+            raise _fail("--cert-ref/--cert-password-ref are only valid with --auth certificate")
+    elif secret_opts:
+        raise _fail("--client-secret-* options are only valid with --auth client-secret")
+    try:
+        return TenantAuth(
+            method="client_secret" if auth is AuthChoice.client_secret else "certificate",
+            client_id=client_id,
+            client_secret=client_secret_ref,
+            client_secret_expires=client_secret_expires,
+            cert=cert_ref,
+            cert_password=cert_password_ref,
+        )
+    except ValidationError as exc:
+        # hide_input_in_errors: messages never contain the (possibly literal) value.
+        raise _fail(
+            "; ".join(f"{'.'.join(map(str, e['loc'])) or 'auth'}: {e['msg']}" for e in exc.errors())
+        ) from None
 
 
 @tenant_app.command("add")
@@ -238,12 +284,41 @@ def tenant_add(
         str, typer.Option("--name", help="Tenant domain, e.g. contoso.onmicrosoft.com")
     ],
     customer: Annotated[str, typer.Option("--customer", help="Customer slug")],
+    auth: Annotated[
+        AuthChoice | None,
+        typer.Option("--auth", help="Tenant's own auth; default: settings.yaml app:"),
+    ] = None,
+    client_id: Annotated[
+        str | None, typer.Option("--client-id", help="Application (client) ID of the app")
+    ] = None,
+    client_secret_ref: Annotated[
+        str | None,
+        typer.Option(
+            "--client-secret-ref",
+            help="Secret REFERENCE (file:/path, env:VAR, vault:..., keyvault:...); "
+            "literal secrets are refused",
+        ),
+    ] = None,
+    client_secret_expires: Annotated[
+        str | None,
+        typer.Option("--client-secret-expires", help="Secret expiry date, YYYY-MM-DD"),
+    ] = None,
+    cert_ref: Annotated[
+        str | None, typer.Option("--cert-ref", help="Certificate reference (default: secrets.cert)")
+    ] = None,
+    cert_password_ref: Annotated[
+        str | None, typer.Option("--cert-password-ref", help="Certificate password reference")
+    ] = None,
 ) -> None:
     """Append a tenant to tenants.yaml and print the admin-consent URL."""
     c = _ctx(ctx)
+    tenant_auth = _tenant_auth(
+        auth, client_id, client_secret_ref, client_secret_expires, cert_ref, cert_password_ref
+    )
     try:
         settings = load_settings(c.config_dir)
-        new = TenantConfig(id=tenant_id, name=name, customer=customer)
+        new = TenantConfig(id=tenant_id, name=name, customer=customer, auth=tenant_auth)
+        resolved = resolve_auth(settings, new)
     except ConfigError as exc:
         raise _fail(str(exc)) from None
     except ValidationError as exc:
@@ -264,9 +339,18 @@ def tenant_add(
     except ConfigError as exc:
         raise _fail(str(exc)) from None
 
-    out.print(f"Added {new.name} (customer {new.customer}) to {path}", highlight=False)
-    out.print("Send this admin-consent URL to a Global Administrator of the client tenant:")
-    out.print(CONSENT_URL.format(tenant=new.id, client_id=settings.app.client_id), highlight=False)
+    out.print(
+        f"Added {new.name} (customer {new.customer}, auth {resolved.method}) to {path}",
+        highlight=False,
+    )
+    if resolved.method == "client_secret":
+        out.print(
+            "The client's app registration needs admin consent for its Graph permissions "
+            "(already granted for apps used by the Zabbix templates). If not, send:"
+        )
+    else:
+        out.print("Send this admin-consent URL to a Global Administrator of the client tenant:")
+    out.print(CONSENT_URL.format(tenant=new.id, client_id=resolved.client_id), highlight=False)
     out.print(f"Then run: m365c tenant verify {new.customer}", highlight=False)
 
 
