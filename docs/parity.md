@@ -1,7 +1,7 @@
 # Zabbix template parity matrix
 
 Source of truth: the Zabbix 7.4 exports `../m365.yaml` and `../liberty_m365.yaml` (a per-client
-variant). Both contain the same eleven templates. Liberty differs only where noted (an extra
+variant). Both contain the same ten templates. Liberty differs only where noted (an extra
 `-org` copy of the mailbox discovery script, a `mails sent - B` debug item, and a quoting-aware
 CSV parser in the send/receive audit that keeps rows with empty or zero counts).
 
@@ -23,7 +23,7 @@ All new metrics carry `customer` and `tenant` labels as well; they are left out 
 | `{$MS.GRAPH.CLIENT.SECRET}` (SECRET_TEXT or plain) | tenant `auth.client_secret`: a secret *reference* (`file:`, `env:`, `vault:`, `keyvault:`); inline values are rejected | ✅ |
 | `{$MS.GRAPH.TENANT.ID}` | tenant `id` | ✅ |
 | `{$MS.GRAPH.DAYS.BACK}` (D7/D30/D90/D180) | `reports.period` in settings, per-tenant `reports.period` override; validated | ✅ |
-| `{$MS.GRAPH.DAYS.INACTIVE}` (referenced, never defined in the templates) | threshold `inactive_days` → `m365_threshold{check="inactive_days"}` | ✅ |
+| `{$MS.GRAPH.DAYS.INACTIVE}` (referenced, never defined in the templates) | threshold `inactive_days` → `m365_threshold{check="inactive_days"}`, used by the mailbox-report inactivity table (works without Entra ID P1) and by `M365UserInactive` (sign-in based) | ✅ |
 | `{$MS.GRAPH.MAILBOX.SIZE.GB}` (10) | threshold `mailbox_size_gb_min` → `m365_threshold{check="mailbox_size_gb_min"}` | ⚠️ applied in dashboards, not at collection (every mailbox is collected) |
 | `{$MS.GRAPH.ONEDRIVE.SIZE.GB}` (1) | threshold `onedrive_size_gb_min` | ⚠️ as above |
 | `{$MAILS.SENT}` / `{$MAILS.RECEIVED}` (800) | thresholds `mail_sent_max` / `mail_received_max` (old `_7d` keys accepted) | ✅ |
@@ -74,7 +74,7 @@ All new metrics carry `customer` and `tenant` labels as well; they are left out 
 
 | Template item | Kind | m365c metric | Status |
 |---|---|---|---|
-| `get.raw.data.m365.mailbox` (`getMailboxUsageDetail(period='D30')`, `lastActivityDate` older than `{$MS.GRAPH.DAYS.INACTIVE}`, incl. `isDeleted`) | Script | `mailbox` collector with configurable `reports.period` | ⚠️ the period is configurable (D30 to match), and inactivity is a query against `m365_threshold{check="inactive_days"}` instead of a collection-time filter |
+| `get.raw.data.m365.mailbox` (`getMailboxUsageDetail(period='D30')`, `lastActivityDate` older than `{$MS.GRAPH.DAYS.INACTIVE}`, incl. `isDeleted`) | Script | `mailbox` collector with configurable `reports.period` | ⚠️ the period is configurable (D30 to match). Inactivity is the Grafana table *Mailboxes inactive longer than inactive_days (mailbox report)*: `(time() - m365_mailbox_last_activity_timestamp) / 86400 > inactive_days`, plus mailboxes with no activity at all (`m365_mailbox_info` without a last-activity sample, shown as "never", as the template treated a null date as inactive). A table, not an alert, as the template had items but no trigger |
 | `mail.last.activity` | Dependent | `m365_mailbox_last_activity_timestamp{upn}` | ✅ |
 | `mail.used.storage` | Dependent | `m365_mailbox_used_bytes{upn}` | ✅ |
 | `itemCount`, `displayName` (raw JSON) | — | `m365_mailbox_items`, `m365_mailbox_info{display_name}` | ✅ |
@@ -85,7 +85,7 @@ All new metrics carry `customer` and `tenant` labels as well; they are left out 
 | Template item | Kind | m365c metric | Status |
 |---|---|---|---|
 | `get.raw.data.m365.onedrive` (`getOneDriveUsageAccountDetail`, beta JSON, ≥ size GB, + `licenseDetails` per owner) | Script | `onedrive` collector, `source: report` (default): v1.0 CSV, configured period, `Reports.Read.All` only | ⚠️ size filter moved to the dashboard; per-owner `licenseDetails` dropped (`m365_user_license` has it) |
-| `discover.onedrive` (`{#PRINCIPALNAME}`, `{#FORMATTEDNAME}`, filters `{#ISDELETED}=false`, `{#LASTACTIVITY}` not null) | Discovery → host per OneDrive | `m365_onedrive_info{upn,display_name}` | ⚠️ deleted rows are skipped; never-active OneDrives are kept (no last-activity sample) |
+| `discover.onedrive` (`{#PRINCIPALNAME}`, `{#FORMATTEDNAME}`; filter `{#ISDELETED}=false` **or** `{#LASTACTIVITY}` not null, so deleted OneDrives *with* activity were discovered too) | Discovery → host per OneDrive | `m365_onedrive_info{upn,display_name}` | ⚠️ every deleted row is skipped (including deleted OneDrives with activity, which the template kept); never-active OneDrives are kept (no last-activity sample) |
 | `onedrive.used` (`storageUsedInBytes`) | Dependent | `m365_onedrive_used_bytes{upn}` | ✅ |
 | `onedrive.total` (`storageAllocatedInBytes`) | Dependent | `m365_onedrive_total_bytes{upn}` | ✅ |
 | `onedrive.filecount` | Dependent | `m365_onedrive_file_count{upn}` | ✅ |

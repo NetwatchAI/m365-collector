@@ -77,7 +77,10 @@ Built-in metrics: `m365_collector_success{collector}`, `m365_collector_enabled{c
 `m365_collector_samples`, `m365_collector_interval_seconds`,
 `m365_collector_permission_ok{collector}`, `m365_tenant_auth_ok`,
 `m365_tenant_auth_error{reason}`, `m365_tenant_permission{permission}`,
-`m365_client_secret_expiry_timestamp{client_id}`, `m365_threshold{check}`,
+`m365_collector_expected{collector}`, `m365_report_rows_skipped{report,reason}`,
+`m365_client_secret_expiry_timestamp{client_id}`,
+`m365_tenant_cert_expiry_timestamp{thumbprint}` (a tenant's own `auth.cert`),
+`m365_threshold{check}`,
 `m365_collector_build_info{version}`, `m365_graph_requests_total{status}`,
 `m365_graph_throttled_total`, `m365_exporter_duplicate_series{collector}` (only when samples
 were dropped), and `m365_cert_expiry_timestamp{thumbprint}` (no customer/tenant: the shared
@@ -85,18 +88,27 @@ default certificate).
 
 Health semantics:
 
-- `m365_tenant_auth_ok` follows the most recent token request / Graph call of *any*
-  collector for the tenant: a definitive token failure (an `AADSTS…` code, or a secret that
-  cannot be loaded) or a Graph 401 sets it to 0, and `m365_tenant_auth_error{reason}` says
-  why; any successful run (or a skip, which also needs a token) sets it back to 1.
-  Identity-service outages (no `AADSTS` code, network errors) are transient and do not
-  change it.
+- `m365_tenant_auth_ok` is 0 and `m365_tenant_auth_error{reason}` says why while either
+  - the tenant has a definitive token failure (an `AADSTS…` code, a secret that cannot be
+    loaded, a token with no application roles: `no_roles`, or identity errors lasting 30
+    min: `identity_unreachable`). Token failures are tenant-wide: the next run of *any*
+    collector that gets a token clears it, so it recovers within one `servicehealth` cycle;
+  - or *any* collector's last run got a Graph 401. That is tracked per collector and only
+    cleared by that collector's next run, so another collector's success cannot hide it.
+
+  Short identity-service outages (no `AADSTS` code, network errors) are transient and do
+  not change it.
 - `m365_collector_permission_ok{collector}` is 0 while that collector's last run got a Graph
   403 (a permission that is in the token but refused, or a licence-gated feature). That is a
   `M365PermissionMissing` warning, not "cannot authenticate".
 - A **skipped** collector (permission not in the token) exports `m365_collector_enabled 0`
   and `m365_collector_skipped`, but no success, duration or last-success series, so it
   raises no `CollectorFailing`/`CollectorStale` alerts. Its previous snapshot is dropped.
+  A token outage leaves it skipped (no failed run for a collector that is not meant to run).
+  If the tenant is *expected* to run it (`m365_collector_expected 1`: listed explicitly in
+  `collectors:`, or a template-parity collector under `collectors: all`),
+  `M365CollectorSkipped` fires; `M365PermissionRevoked` fires when a role that was in the
+  token disappears.
 - A failed run is retried after 5 min, then 10, 20, 40, capped at 1 h (never later than the
   normal interval). A skipped collector re-checks the token at least hourly.
 - After a restart, persisted snapshots are served again and their collection time is
@@ -118,8 +130,8 @@ Collector notes:
   for sign-ins since about December 2023.
   `m365_user_last_activity_timestamp` is the last successful sign-in, or else the mailbox
   report's *Last Activity Date* taken from the `mailbox` collector's latest snapshot for the
-  tenant (so it appears from the first `users` run after a `mailbox` run). The same
-  fallback as a query, without that coupling:
+  tenant (so it appears from the first `users` run after a `mailbox` run). The dashboard
+  does not depend on that coupling; it uses the same fallback as a query:
   `m365_user_last_signin_timestamp or on(customer, tenant, upn) m365_mailbox_last_activity_timestamp`.
   Agent identities are excluded with `$filter=not isof('microsoft.graph.agentUser')` (sent as
   an advanced query) plus a client-side `@odata.type` check; a tenant that answers 400 to the
@@ -129,8 +141,9 @@ Collector notes:
   did: used, allocated (exported as `_total_bytes`), file count, last activity, display
   name; deleted OneDrives are skipped. `quota` is the live per-user `/drive` method
   (`User.Read.All` + `Files.Read.All`; adds recycle-bin bytes, one call per licensed user,
-  worker pool bounded by `per_tenant_concurrency`; a 404 skips the user; the run fails only
-  if every drive is refused or more than 10 % fail). `auto` uses `quota` when the token holds
+  worker pool bounded by `per_tenant_concurrency`; a 404 skips the user; 403s on single
+  drives are logged but not counted as failures; the run fails only if every drive is
+  refused or more than 10 % fail with other errors). `auto` uses `quota` when the token holds
   both roles, otherwise `report`. Gating applies to the effective source.
 - **mailbox / mailtraffic / onedrive (report)** use the tenant's report period
   (`reports.period`: `D7`, `D30`, `D90`, `D180`; the template macro `{$MS.GRAPH.DAYS.BACK}`).
@@ -141,7 +154,8 @@ Collector notes:
   contains `@` and at least half look like 32-character hex hashes. Either way
   `m365_reports_concealed{report, source="setting"|"heuristic"}` is exported, per-user series
   are skipped when concealed, and the run still succeeds. Rows whose UPN has no `@` are
-  never exported. Rows with `Is Deleted = True` are skipped (counted in
+  never exported; they are counted in `m365_report_rows_skipped{report,reason="no_upn"}` and
+  logged once, so a partially hashed report does not make users vanish silently. Rows with `Is Deleted = True` are skipped (counted in
   `m365_mailbox_deleted`); empty dates produce no sample.
 - **mailtraffic** keeps users with zero or empty counts (exported as 0), as the Liberty
   template's fix did; CSV parsing is RFC 4180 (quoted display names with commas are fine).
@@ -221,7 +235,9 @@ tenants:
   | `AADSTS700027` | `invalid_certificate` | certificate not accepted (not uploaded?) |
   | `AADSTS7000112` | `app_disabled` | application disabled |
   | other `AADSTS…` | `auth_failed` | |
-  | secret cannot be loaded | `secret_unavailable` | |
+  | secret cannot be loaded | `secret_unavailable` | the log names the file/backend; for files, the uid that must be able to read it |
+  | token without application roles | `no_roles` | Entra omits the `roles` claim when nothing is granted: consent revoked |
+  | identity service failing without an AADSTS code for 30 min | `identity_unreachable` | e.g. an intercepting proxy, or the endpoint unreachable |
   | Graph 401 | `unauthorized` | |
 
 - **Client secret expiry.** An app cannot read its own secret's expiry without
@@ -247,8 +263,21 @@ token is never logged or printed) and, before every run:
 `collectors: all` means every collector the tenant's permissions allow. An explicit list
 that names a collector without its permissions logs the warning, skips it and reports it;
 it never crashes. `m365_tenant_permission{permission}` shows, per tenant, which of the roles
-m365c uses are in the token (1) or not (0). A token without a `roles` claim disables gating
-(everything runs, as before).
+m365c uses are in the token (1) or not (0).
+
+A JWT **without** a `roles` claim (or with an empty one) means the app has no application
+permission in the tenant (Entra omits the claim then: consent revoked or never granted).
+That is an auth failure, `M365TenantAuthFailed` with `reason="no_roles"`, not a silent skip.
+Only a token that is not a JWT at all disables gating (everything runs).
+
+Loss of monitoring is never silent:
+
+| situation | alert |
+|---|---|
+| consent revoked, no roles left | `M365TenantAuthFailed{reason="no_roles"}` (critical) |
+| a role that was granted is removed | `M365PermissionRevoked` (role was in the token within 7 days) |
+| an expected collector cannot run | `M365CollectorSkipped` (explicit `collectors:` entry, or parity collector under `all`; after 1 h) |
+| a role is in the token but Graph refuses (403) | `M365PermissionMissing` |
 
 ```sh
 m365c permissions             # required vs optional per collector + minimal parity set
@@ -390,56 +419,91 @@ overrides a template macro, which overrides a global one.
 ### 1. Find each client's IDs and secret
 
 The Zabbix UI and API never show `SECRET_TEXT` values, but the database stores them in
-clear text (`type = 1`). `type = 2` is a **vault** macro: the value is a vault path
-(`path/to/secret:key`), and the secret itself must be read from that vault. `type = 0` is
-plain text. Templates are rows in `hosts` with `status = 3`.
+clear text. The macro `type` column says how the value is stored:
 
-MySQL / MariaDB and PostgreSQL (same SQL):
+| `type` | meaning | where the secret is |
+|---|---|---|
+| 0 | plain text | in `value`, in clear text. **The Liberty template and several m365.yaml templates store `{$MS.GRAPH.CLIENT.SECRET}` this way.** |
+| 1 | secret text | in `value`, in clear text (only hidden in the UI/API) |
+| 2 | vault | `value` is a vault path (`path/to/secret:key`); read the secret from that vault |
+
+Templates are rows in `hosts` with `status = 3`. The listing below masks the secret by
+macro **name**, whatever its type, so nothing secret reaches the screen. MySQL / MariaDB and
+PostgreSQL (same SQL):
 
 ```sql
 -- template and host macros
 SELECT h.host, CASE h.status WHEN 3 THEN 'template' ELSE 'host' END AS kind,
-       hm.macro, hm.type, CASE WHEN hm.type = 1 THEN '<secret>' ELSE hm.value END AS value
+       hm.macro, hm.type,
+       CASE WHEN hm.macro = '{$MS.GRAPH.CLIENT.SECRET}' THEN '<secret>' ELSE hm.value END AS value
 FROM hostmacro hm
 JOIN hosts h ON h.hostid = hm.hostid
 WHERE hm.macro IN ('{$MS.GRAPH.TENANT.ID}', '{$MS.GRAPH.CLIENT.ID}', '{$MS.GRAPH.CLIENT.SECRET}',
                    '{$MS.GRAPH.DAYS.BACK}', '{$MAILS.SENT}', '{$MAILS.RECEIVED}',
-                   '{$MS.GRAPH.MAILBOX.SIZE.GB}', '{$MS.GRAPH.ONEDRIVE.SIZE.GB}')
+                   '{$MS.GRAPH.MAILBOX.SIZE.GB}', '{$MS.GRAPH.ONEDRIVE.SIZE.GB}',
+                   '{$MS.GRAPH.DAYS.INACTIVE}')
 ORDER BY h.host, hm.macro;
 
 -- global macros
-SELECT macro, type, CASE WHEN type = 1 THEN '<secret>' ELSE value END AS value
+SELECT macro, type,
+       CASE WHEN macro = '{$MS.GRAPH.CLIENT.SECRET}' THEN '<secret>' ELSE value END AS value
 FROM globalmacro
 WHERE macro LIKE '{$MS.GRAPH.%' OR macro LIKE '{$MAILS.%';
 ```
 
-This lists everything but the secrets. Note each client's tenant ID, client ID and which
-host/template holds the secret.
+Note each client's tenant ID, client ID, and which host, template or global macro holds the
+secret and with which `type`.
 
-### 2. Write the secret to a file (0600, never on screen)
+### 2. Write the secret to a file the container can read (never on screen)
 
-Read one secret straight into a file, so it never appears in the terminal or in shell
-history. Put the SQL in a file (the `{$…}` macro names would otherwise need shell escaping):
+The collector runs as uid/gid **10001** and reads `deploy/secrets/tenants/` through a bind
+mount, so the directory must be traversable by group 10001 and the file readable by uid
+10001. Create the directory **before** setting a restrictive umask (`umask 077` alone would
+make it 0700 and unreadable for the container):
 
 ```sh
+sudo install -d -m 0750 -o "$(id -un)" -g 10001 deploy/secrets/tenants
 umask 077
-mkdir -p deploy/secrets/tenants
+```
+
+Then read one secret straight into a file, so it never appears in the terminal or in shell
+history. Put the SQL in a file (the `{$…}` macro names would otherwise need shell escaping),
+and pick the variant that matches where the secret is:
+
+```sh
 cat > /tmp/secret.sql <<'SQL'
+-- host or template macro (type 0 = plain text or 1 = secret text)
 SELECT hm.value FROM hostmacro hm JOIN hosts h ON h.hostid = hm.hostid
-WHERE h.host = 'M365 send receive audit' -- the template/host that holds the client's secret
-  AND hm.macro = '{$MS.GRAPH.CLIENT.SECRET}' AND hm.type = 1;
+WHERE h.host = 'M365 send receive audit'   -- the template/host that holds the client's secret
+  AND hm.macro = '{$MS.GRAPH.CLIENT.SECRET}' AND hm.type IN (0, 1);
 SQL
-# MySQL / MariaDB
-mysql --batch --skip-column-names -u zabbix -p zabbix < /tmp/secret.sql \
+# or, for a global macro:
+#   SELECT value FROM globalmacro
+#   WHERE macro = '{$MS.GRAPH.CLIENT.SECRET}' AND type IN (0, 1);
+
+# MySQL / MariaDB (--raw: no escaping of backslashes or tabs in the value)
+mysql --batch --raw --skip-column-names -u zabbix -p zabbix < /tmp/secret.sql \
   | tr -d '\n' > deploy/secrets/tenants/contoso_client_secret
 # PostgreSQL
 psql -At -U zabbix -d zabbix -f /tmp/secret.sql \
   | tr -d '\n' > deploy/secrets/tenants/contoso_client_secret
 rm /tmp/secret.sql
-chmod 0400 deploy/secrets/tenants/contoso_client_secret
-sudo chown 10001 deploy/secrets/tenants/contoso_client_secret   # the container user
-test -s deploy/secrets/tenants/contoso_client_secret && echo "written, $(wc -c < deploy/secrets/tenants/contoso_client_secret) bytes"
+test -s deploy/secrets/tenants/contoso_client_secret \
+  && echo "written, $(wc -c < deploy/secrets/tenants/contoso_client_secret) bytes" \
+  || echo "EMPTY: wrong host name, macro type 2 (vault), or the secret is a global macro"
+sudo chown 10001:10001 deploy/secrets/tenants/contoso_client_secret
+sudo chmod 0400 deploy/secrets/tenants/contoso_client_secret
 ```
+
+Check that the container can read it (prints the byte count, not the secret):
+
+```sh
+docker compose -f deploy/docker-compose.yml exec collector \
+  python -c "print(len(open('/run/m365c-secrets/contoso_client_secret','rb').read()))"
+```
+
+If it cannot, the tenant reports `reason="secret_unavailable"` and the log names the file
+and says that uid 10001 must be able to read it and traverse its directories.
 
 For a vault macro (`type = 2`), read the secret from that vault instead, or point m365c at
 it directly: `client_secret: vault:<mount>/<path>#<key>` (HashiCorp KV v2) or
@@ -477,6 +541,7 @@ If the template used another `{$MS.GRAPH.DAYS.BACK}` than `D7`, set it on the te
 | *M365 Mailbox Size – F1* / *– G3* | `m365_mailbox_used_bytes * on(customer,tenant,upn) group_left() (max by (customer,tenant,upn) (m365_user_license{sku="M365_F1_GOV"}) unless on(customer,tenant,upn) m365_user_license{sku="M365_G3_GOV"})` (swap SKUs for G3) |
 | OneDrive: `onedrive.used`, `onedrive.total`, `onedrive.filecount`, `onedrive.lastactivity` | `m365_onedrive_used_bytes`, `m365_onedrive_total_bytes`, `m365_onedrive_file_count`, `m365_onedrive_last_activity_timestamp` |
 | `onedrive.free.storage`, `onedrive.pused.storage` | `m365_onedrive_total_bytes - m365_onedrive_used_bytes`, `m365_onedrive_used_bytes / m365_onedrive_total_bytes` |
+| Inactivity audit: `mail.last.activity` older than `{$MS.GRAPH.DAYS.INACTIVE}` (D30) | Grafana table *Mailboxes inactive longer than inactive_days (mailbox report)*: `(time() - m365_mailbox_last_activity_timestamp) / 86400 > on(customer,tenant) group_left() m365_threshold{check="inactive_days"}`, plus never-active mailboxes (`m365_mailbox_info unless on(customer,tenant,upn) m365_mailbox_last_activity_timestamp`). No P1 needed |
 | `sent.mails`, `recieved.mails` | `m365_mail_sent{upn=…}`, `m365_mail_received{upn=…}` (same `period`) |
 | Discovered high-traffic users | `M365HighMailTraffic` alert / "Emails sent/received" table |
 
@@ -616,7 +681,9 @@ cp config/thresholds.example.yaml config/thresholds.yaml
 m365c -c config tenant add ...                             # or copy tenants.example.yaml
 # secrets (git-ignored), see deploy/secrets/README.md
 cp m365c_cert.pem deploy/secrets/m365c_cert.pem            # only if a tenant uses the default cert
-#   per-tenant client secrets: deploy/secrets/tenants/<customer>_client_secret (uid 10001, 0400)
+#   per-tenant client secrets: directory first (group 10001 must traverse it), then the files:
+#   sudo install -d -m 0750 -o "$(id -un)" -g 10001 deploy/secrets/tenants
+#   deploy/secrets/tenants/<customer>_client_secret (owner 10001, mode 0400), see Migrating
 openssl rand -base64 24 > deploy/secrets/grafana_admin_password
 printf '%s' 'smtp-password' > deploy/secrets/alertmanager_smtp_password
 printf '%s' 'https://hooks.example/...' > deploy/secrets/alertmanager_webhook_contoso
@@ -635,7 +702,9 @@ docker compose -f deploy/docker-compose.yml up -d --build
   with TLS in front for remote access.
 - Alloy ships container logs labelled `logs.netwatch/ship=true` to Loki, with `level`,
   `customer` and `collector` extracted as labels. Alloy talks to a `docker-socket-proxy` that
-  only allows `GET /containers/*` and `GET /networks`, not the Docker socket.
+  only allows `GET /containers/*` and `GET /networks`, not the Docker socket. The proxy sits
+  on its own internal network shared only with Alloy, because container inspect output
+  includes other containers' environment.
 
 **Personal data.** Logs and the snapshot cache contain user principal names, and the cache
 also holds display names, departments and licences (`*_info`, `m365_user_license`). With
@@ -660,7 +729,10 @@ was down). Loki keeps logs for 30 days. Treat both volumes as customer data:
 | `M365ServiceDegraded` | a service is degraded/interrupted/investigating | warning |
 | `M365AppCredentialExpiring` | an app secret/certificate in the tenant expires within 30 days (needs `Application.Read.All`) | warning |
 | `M365ClientSecretExpiring` | the tenant's own client secret (`auth.client_secret_expires`) expires within 30 days or has expired | warning |
-| `M365TenantAuthFailed` | token failure or Graph 401; `reason` label from `m365_tenant_auth_error` (`secret_expired`, `invalid_client_secret`, `secret_unavailable`, …) with matching guidance | critical |
+| `M365TenantAuthFailed` | token failure or Graph 401; `reason` label from `m365_tenant_auth_error` (`secret_expired`, `invalid_client_secret`, `secret_unavailable`, `no_roles`, `identity_unreachable`, …) with matching guidance | critical |
+| `M365TenantCertificateExpiring` | a tenant's own certificate (`auth.cert`) expires within 30 days or has expired | warning |
+| `M365CollectorSkipped` | an *expected* collector is skipped for a missing permission, for 1 h (`permission` label) | warning |
+| `M365PermissionRevoked` | a Graph role that was in the tenant's token in the last 7 days is gone | warning |
 | `M365PermissionMissing` | a collector got Graph 403 | warning |
 | `M365ReportsConcealed` | report names concealed (setting or heuristic) | warning |
 | `M365CollectorFailing` | last run failed, for 3h | warning |
@@ -668,16 +740,18 @@ was down). Loki keeps logs for 30 days. Treat both volumes as customer data:
 | `M365CollectorDown` | Prometheus cannot scrape the collector (`customer="netwatch"`) | critical |
 | `M365CertificateExpiring` | the default certificate expires within 30 days (`customer="netwatch"`) | critical |
 
-**What goes quiet when a collector is skipped** (e.g. for the legacy apps, which have only
-the parity permissions): `M365ServiceDegraded` (servicehealth), `M365AppCredentialExpiring`
-(appsecrets; use `M365ClientSecretExpiring`), secure-score panels, and `M365UserInactive`
-without `AuditLog.Read.All` + Entra ID P1. Skipped collectors never fire
+**What goes quiet when a collector is skipped by design** (e.g. for the legacy apps, which
+have only the parity permissions): `M365ServiceDegraded` (servicehealth),
+`M365AppCredentialExpiring` (appsecrets; use `M365ClientSecretExpiring`), secure-score
+panels, and `M365UserInactive` without `AuditLog.Read.All` + Entra ID P1 (the mailbox-report
+inactivity table still works). Skipped collectors never fire
 `CollectorFailing`/`CollectorStale`; they are listed in the dashboard's "Collectors skipped"
-table and by `m365_collector_enabled == 0`.
+table and by `m365_collector_enabled == 0`. Parity collectors that *stop* running because a
+permission was lost are not quiet: see [Permission gating](#permission-gating).
 
 Each alert has `customer`, `tenant` and a `summary` naming the user, SKU, app or service.
-Alertmanager inhibits `CollectorFailing`/`CollectorStale`/`PermissionMissing` while
-`TenantAuthFailed` fires for the same tenant.
+Alertmanager inhibits `CollectorFailing`/`CollectorStale`/`PermissionMissing`/
+`CollectorSkipped`/`PermissionRevoked` while `TenantAuthFailed` fires for the same tenant.
 
 **Validation runs in the test suite.** `tests/test_deploy.py` runs `promtool check rules`,
 `promtool check config`, `promtool test rules` (a unit test per alert, firing and not firing,
@@ -752,7 +826,7 @@ From the original build:
 |---|---|---|
 | Retry 429 and 503/504 | Also retries 500, 502 and network errors (same backoff) | Transient Graph errors; one blip shouldn't fail a daily run |
 | `m365_reports_concealed` with `customer`, `tenant` | Extra `report` label (and now `source`) | Several collectors emit it; identical label sets would make Prometheus reject the scrape |
-| `m365_tenant_auth_ok` 0 on any `GraphAuthError` | 0 on definitive token failures and Graph 401; a 403 sets `m365_collector_permission_ok{collector}` 0 instead | A single refused permission is not "cannot authenticate" |
+| `m365_tenant_auth_ok` 0 on any `GraphAuthError` | 0 on definitive token failures (tenant-wide) and Graph 401s (per collector); a 403 sets `m365_collector_permission_ok{collector}` 0 instead | A single refused permission is not "cannot authenticate"; a 401 must not be cleared by another collector's success (review 2 L10) |
 | Last sign-in timestamp | `lastSuccessfulSignInDateTime` only, plus `m365_user_created_timestamp` | The other fields include failed attempts |
 | `securescore` `$top=1` | `$top=7`, newest by `createdDateTime` | The order isn't documented |
 | `M365LicenseExhausted` `available == 0`, critical | `available <= 0`, warning | Fully assigned SKUs are normal for small clients |
@@ -776,9 +850,11 @@ From the parity refactor (`m365-collector-parity-handover.md`):
 | — | `Directory.Read.All` is not counted as satisfying any group | Not in the spec's parity set; Graph docs list it as a higher-privileged alternative for `subscribedSkus`, so a tenant granted only that role would see `license` skipped |
 | Default certificate optional when unused | Checked at startup and **fatal** if a tenant uses it or there are no tenants (as before); otherwise only a warning | Keeps the old fail-fast behaviour where it matters, lets client-secret-only deployments start with the Compose file's cert line still present |
 | `tenant verify` | Exit 1 also for a collector listed explicitly in `collectors:` that is skipped | It was asked for and cannot run; under `collectors: all` a skip is informational |
+| Gating: skip collectors without permission | A token with **no** roles is an auth failure (`no_roles`); skipped *expected* collectors and revoked roles alert (`M365CollectorSkipped`, `M365PermissionRevoked`) | Review 2 H1: a silent skip turned loss of consent into loss of monitoring with no alert |
+| Persistent identity-service errors were always "transient" | After 30 min they become `reason="identity_unreachable"` | Review 2 L5: a misconfigured proxy would otherwise never show as an auth problem |
 | Client secret expiry alert `< 30 days` | Includes already expired secrets | Configured on purpose; unlike tenant app credentials, they must be renewed |
 | `m365c permissions` printed a flat list | Prints a table plus the parity set; `--all` gives the old flat list, `--parity` the four lines | Required vs optional per collector |
-| Per-tenant certificates | Supported (`auth.cert`), but only the default certificate exports `m365_cert_expiry_timestamp` | Kept the metric's meaning (Netwatch's own certificate); per-tenant certificate expiry is a follow-up |
+| Per-tenant certificates | Supported (`auth.cert`); exported as `m365_tenant_cert_expiry_timestamp{customer,tenant,thumbprint}` with `M365TenantCertificateExpiring`; the default certificate keeps `m365_cert_expiry_timestamp` | A separate metric, so the default certificate's alert (labelled `customer="netwatch"`) is not duplicated per tenant |
 | `CertificateTokenProvider` (internal API) | Replaced by `TenantTokenProvider` | Per-tenant methods and secrets |
 | Optional `m365c zabbix parity-check` | **Not implemented** | Optional; see Branch status |
 
@@ -850,6 +926,8 @@ promtool check/test, amtool, `docker compose config`.
   `M365TenantAuthFailed`, renamed metrics), promtool tests.
 - Phase 6: `tenant add --auth …` (references only), migration guide.
 - Phase 7: this README.
+- Review 2 fixes (`m365-collector-review-2.md`): every finding H1–H2, M1–M3, L1–L12 and
+  N1–N5. See "Review 2" below.
 
 **Left**
 
@@ -857,8 +935,9 @@ promtool check/test, amtool, `docker compose config`.
   Sketch: read item values with `item.get`/`history.get` for the hosts created by the
   discovery rules, map them with the checklist in "Migrating from the Zabbix templates",
   query Prometheus `/api/v1/query` for the same UPNs, print differences; mark experimental.
-- Per-tenant certificate expiry metric (only the default certificate is exported).
-- Real-tenant validation (list above).
+- Real-tenant validation (list above), including the review 2 drills: wrong secret, removed
+  `Reports.Read.All` (expect `M365PermissionRevoked` and `M365CollectorSkipped`), revoked
+  consent (expect `reason="no_roles"`), rotated secret file.
 
 **Resume**
 
@@ -869,6 +948,35 @@ uv run python -m pytest -q && uv run ruff check && uv run ruff format --check &&
 ```
 
 Key files: `src/m365c/auth.py` (methods, `TenantTokenProvider`, error mapping),
+`src/m365c/health.py` (auth and skip state),
 `src/m365c/config.py` (`TenantAuth`, `resolve_auth`, thresholds), `src/m365c/scheduler.py`
 (gating), `src/m365c/collectors/` (`required_permissions`/`optional_permissions`),
-`tests/test_parity_e2e.py` (acceptance), `tests/test_secret_leaks.py`.
+`tests/test_parity_e2e.py` (acceptance), `tests/test_secret_leaks.py`,
+`tests/test_review2.py` (review 2 regressions). The full suite runs in about 30 s (the fake
+identity endpoint is used with `retry_total=0`; promtool through Docker is most of it).
+
+### Review 2
+
+| ID | Fix |
+|---|---|
+| H1 | No-roles token → `TokenError(reason="no_roles")`; `m365_collector_expected`; alerts `M365CollectorSkipped`, `M365PermissionRevoked`; promtool tests |
+| H2 | Migration steps create `deploy/secrets/tenants` as `0750 op:10001` before `umask 077`; container read check; permission-denied message names uid and fix |
+| M1 | Grafana table "Mailboxes inactive longer than inactive_days (mailbox report)", including never-active mailboxes; parity matrix and comparison table updated |
+| M2 | Migration SQL masks by macro name, extracts `type IN (0, 1)`, has a `globalmacro` variant, uses `mysql --raw` |
+| M3 | README: a JWT without roles is an auth error; only a non-JWT disables gating |
+| L1 | Disabled-users widget uses `last_activity or mailbox_last_activity` in PromQL |
+| L2 | `m365_report_rows_skipped{report,reason="no_upn"}` + one warning |
+| L3 | GUID errors no longer echo the value |
+| L4 | `_ready` closes a credential built for an entry that `configure()` replaced, and retries |
+| L5 | Transient identity errors for 30 min → `identity_unreachable` |
+| L6 | A token failure keeps a skipped collector skipped |
+| L7 | `m365_tenant_cert_expiry_timestamp`, `M365TenantCertificateExpiring` |
+| L8 | Examples show the parity settings; `main`'s examples are kept as `tests/fixtures/legacy-config` for the compatibility test |
+| L9 | e2e over both licence roles; leak tests over all parity collectors, persisted cache files, `tenant add` options, 200-without-token, 500 echo, `invalid_request` echo; Vault/Key Vault tests; `retry_total=0` (suite 51 s → 30 s) |
+| L10 | Graph 401s tracked per collector; token failures stay tenant-wide |
+| L11 | Quota-mode per-drive 403s logged, not counted toward the 10 % failure ratio |
+| L12 | docker-socket-proxy on an internal network shared only with Alloy |
+| N1–N2 | Parity matrix: ten templates; OneDrive discovery filter described as an OR |
+| N3 | `tenant add` checks duplicates before auth problems |
+| N4 | Expired secrets/certificates are worded "has expired" |
+| N5 | Panels for `m365_mailbox_deleted` and `m365_tenant_permission` |
