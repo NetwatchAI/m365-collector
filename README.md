@@ -4,7 +4,11 @@ One multi-tenant Python service that collects Microsoft 365 data from Microsoft 
 every Netwatch client tenant and exposes it as Prometheus metrics. Prometheus,
 Alertmanager and Grafana do storage, alerting and dashboards; Loki keeps the logs.
 
-It replaces the JavaScript Script items in the legacy Zabbix template (`../m365.yaml`).
+It replaces the JavaScript Script items in the legacy Zabbix templates (`../m365.yaml` and
+the per-client variant `../liberty_m365.yaml`) and is a drop-in replacement for them: it
+authenticates with each client's existing app registration and **client secret**, and needs
+only the Graph permissions those apps already have (see [Template parity](#template-parity)).
+The certificate-based single multi-tenant app is supported as well, per tenant.
 
 ## Architecture
 
@@ -12,11 +16,11 @@ It replaces the JavaScript Script items in the legacy Zabbix template (`../m365.
                  ┌──────────────────────────── m365c (one process) ────────────────────────────┐
  tenants.yaml ──►│ ConfigWatcher ──► Scheduler: one asyncio task per (tenant, collector)       │
  thresholds.yaml │                     │  jittered first run, then every interval              │
-                 │                     ▼                                                       │
- cert (secret) ─►│ TokenProvider ─► GraphClient (httpx, retries, 429/503 back-off,            │
-                 │  1 CertificateCredential   global + per-tenant semaphores, paging, CSV)    │
-                 │  per tenant, same app             │                                         │
-                 │                                   ▼                                         │
+                 │                     │  gate: token roles ⊇ collector's required groups?     │
+ secret refs ───►│ TenantTokenProvider ─► GraphClient (httpx, retries, 429/503 back-off,      │
+ (file/env/      │  per tenant: certificate │  global + per-tenant semaphores, paging, CSV)   │
+  vault/kv)      │  or client_secret, lazy  │                                                  │
+                 │  secrets, rotation       ▼                                                  │
                  │                 collectors: license users mailbox onedrive mailtraffic      │
                  │                             servicehealth securescore appsecrets           │
                  │                                   │ success: replace snapshot               │
@@ -32,98 +36,262 @@ It replaces the JavaScript Script items in the legacy Zabbix template (`../m365.
 
 Key properties:
 
-- **One app registration, many tenants.** Tokens are requested per tenant with the same
-  client ID and certificate. There are no per-client secrets and no client-secret auth.
+- **Per-tenant auth.** Each tenant uses either its own app registration with a client
+  secret (what the Zabbix templates used) or the shared Netwatch multi-tenant app with a
+  certificate. `settings.yaml` `app:` is the default; a tenant's `auth:` block overrides it.
+  See [Authentication](#authentication).
+- **Permission-aware.** After the first token for a tenant, m365c reads the token's `roles`
+  claim and runs only the collectors whose permissions are granted; the rest are skipped
+  with a metric and one warning. See [Permission gating](#permission-gating).
 - **Collection is separate from exposure.** `/metrics` renders an in-memory snapshot cache.
   A successful run *replaces* the snapshot for that `(tenant, collector)`, so departed
   users disappear instead of lingering. A failed run keeps the previous snapshot and sets
   `m365_collector_success 0`.
-- **Labels.** Every series has `customer` and `tenant`. Per-user series carry only `upn`;
-  `display_name` and `department` exist only on `m365_user_info`.
-- **Pagination everywhere** (`@odata.nextLink`), so large tenants are not cut off.
+- **Labels.** Every series has `customer` and `tenant`. Per-user series carry `upn`; display
+  names and departments are on the `*_info` metrics only.
+- **Pagination everywhere** (`@odata.nextLink`), so large tenants are not cut off (the
+  templates read a single page).
 - **Each tenant report is downloaded once per interval**, not once per user host.
-- **Tokens never leave memory**; logs are JSON with a redaction processor; httpx/httpcore
-  request logging is suppressed.
+- **Secrets and tokens never leave memory**; logs are JSON with a redaction processor that
+  also scrubs the literal value of every loaded secret; httpx/httpcore request logging is
+  suppressed.
 
 ### Collectors
 
-| name | default interval | Graph source | metrics (all also `customer`, `tenant`) |
-|---|---|---|---|
-| `license` | 1h | `GET /subscribedSkus` | `m365_license_total{sku}`, `_consumed`, `_available`, `_suspended`, `_warning` |
-| `users` | 6h | `GET /users?$select=…,createdDateTime,signInActivity` (paged) | `m365_user_info{upn,display_name,department,enabled,licensed}`, `m365_user_last_signin_timestamp{upn}` (last *successful* sign-in), `m365_user_created_timestamp{upn}`, `m365_users_total{enabled,licensed}`, `m365_users_disabled_licensed`, `m365_tenant_feature{feature="signin_activity"}` |
-| `mailbox` | 12h | `GET /reports/getMailboxUsageDetail(period='D7')` (CSV) | `m365_mailbox_used_bytes{upn}`, `_quota_bytes` (Prohibit Send), `_items`, `_last_activity_timestamp`, `_has_archive`, `m365_reports_concealed{report}` |
-| `onedrive` | 6h | `GET /users/{id}/drive?$select=quota` per licensed, enabled user | `m365_onedrive_used_bytes{upn}`, `_total_bytes`, `_deleted_bytes` |
-| `mailtraffic` | 12h | `GET /reports/getEmailActivityUserDetail(period='D7')` (CSV) | `m365_mail_sent_7d{upn}`, `_received_7d`, `_read_7d`, `m365_reports_concealed{report}` |
-| `servicehealth` | 5m | `GET /admin/serviceAnnouncement/healthOverviews` | `m365_service_status{service,status}` = 1 |
-| `securescore` | 24h | `GET /security/secureScores?$top=7`, newest by `createdDateTime` | `m365_securescore_current`, `m365_securescore_max` |
-| `appsecrets` | 24h | `GET /applications` (paged) | `m365_app_credential_expiry_timestamp{app,app_id,credential_type,key_id}` |
+| name | default interval | Graph source | required permission (any one per line) | metrics (all also `customer`, `tenant`) |
+|---|---|---|---|---|
+| `license` | 1h | `GET /subscribedSkus` | `Organization.Read.All` or `LicenseAssignment.Read.All` | `m365_license_total{sku}`, `_consumed`, `_available`, `_suspended`, `_warning` |
+| `users` | 6h | `GET /users?$select=…,assignedLicenses,createdDateTime[,signInActivity]` (paged) + one `GET /subscribedSkus` | `User.Read.All` (optional: `AuditLog.Read.All` for sign-in; `Organization.Read.All` or `LicenseAssignment.Read.All` for SKU names) | `m365_user_info{upn,display_name,department,enabled,licensed}`, `m365_user_license{upn,sku,sku_id}`, `m365_user_last_signin_timestamp{upn}` (last *successful* sign-in), `m365_user_last_activity_timestamp{upn}`, `m365_user_created_timestamp{upn}`, `m365_users_total{enabled,licensed}`, `m365_users_disabled_licensed`, `m365_tenant_feature{feature="signin_activity"}` |
+| `mailbox` | 12h | `GET /reports/getMailboxUsageDetail(period=…)` (CSV) | `Reports.Read.All` (optional: `ReportSettings.Read.All`) | `m365_mailbox_info{upn,display_name,has_archive}`, `m365_mailbox_used_bytes{upn}`, `_quota_bytes` (Prohibit Send), `_items`, `_last_activity_timestamp`, `_has_archive`, `m365_mailbox_deleted`, `m365_reports_concealed{report,source}` |
+| `onedrive` | 6h | `source: report` (default): `GET /reports/getOneDriveUsageAccountDetail(period=…)` (CSV); `source: quota`: `GET /users/{id}/drive?$select=quota` per licensed, enabled user | report: `Reports.Read.All`; quota: `User.Read.All` and `Files.Read.All` | `m365_onedrive_info{upn,display_name}` (report), `m365_onedrive_used_bytes{upn}`, `_total_bytes`, `_file_count` (report), `_last_activity_timestamp` (report), `_deleted_bytes` (quota), `m365_reports_concealed{report,source}` |
+| `mailtraffic` | 12h | `GET /reports/getEmailActivityUserDetail(period=…)` (CSV) | `Reports.Read.All` (optional: `ReportSettings.Read.All`) | `m365_mail_sent{upn,period}`, `m365_mail_received{upn,period}`, `m365_mail_read{upn,period}`, `m365_reports_concealed{report,source}` |
+| `servicehealth` | 5m | `GET /admin/serviceAnnouncement/healthOverviews` | `ServiceHealth.Read.All` | `m365_service_status{service,status}` = 1 |
+| `securescore` | 24h | `GET /security/secureScores?$top=7`, newest by `createdDateTime` | `SecurityEvents.Read.All` | `m365_securescore_current`, `m365_securescore_max` |
+| `appsecrets` | 24h | `GET /applications` (paged) | `Application.Read.All` | `m365_app_credential_expiry_timestamp{app,app_id,credential_type,key_id}` |
 
-Built-in metrics: `m365_collector_success{collector}`, `m365_collector_duration_seconds`,
-`m365_collector_last_success_timestamp`, `m365_collector_samples`,
-`m365_collector_interval_seconds`, `m365_collector_permission_ok{collector}`,
-`m365_tenant_auth_ok`, `m365_threshold{check}`, `m365_collector_build_info{version}`,
-`m365_graph_requests_total{status}`, `m365_graph_throttled_total`,
-`m365_exporter_duplicate_series{collector}` (only when samples were dropped), and
-`m365_cert_expiry_timestamp{thumbprint}` (no customer/tenant: it is Netwatch's own cert).
+`m365c permissions` prints this table from the code.
+
+Built-in metrics: `m365_collector_success{collector}`, `m365_collector_enabled{collector}`
+(1 runs, 0 skipped), `m365_collector_skipped{collector,reason,permission}`,
+`m365_collector_duration_seconds`, `m365_collector_last_success_timestamp`,
+`m365_collector_samples`, `m365_collector_interval_seconds`,
+`m365_collector_permission_ok{collector}`, `m365_tenant_auth_ok`,
+`m365_tenant_auth_error{reason}`, `m365_tenant_permission{permission}`,
+`m365_client_secret_expiry_timestamp{client_id}`, `m365_threshold{check}`,
+`m365_collector_build_info{version}`, `m365_graph_requests_total{status}`,
+`m365_graph_throttled_total`, `m365_exporter_duplicate_series{collector}` (only when samples
+were dropped), and `m365_cert_expiry_timestamp{thumbprint}` (no customer/tenant: the shared
+default certificate).
 
 Health semantics:
 
 - `m365_tenant_auth_ok` follows the most recent token request / Graph call of *any*
-  collector for the tenant: a definitive token failure (`AADSTS…`: consent removed, cert not
-  uploaded) or a Graph 401 sets it to 0; any successful run sets it back to 1, so it recovers
-  within one `servicehealth` cycle (5 min). Identity-service outages (no `AADSTS` code,
-  network errors) are treated as transient and do not change it.
+  collector for the tenant: a definitive token failure (an `AADSTS…` code, or a secret that
+  cannot be loaded) or a Graph 401 sets it to 0, and `m365_tenant_auth_error{reason}` says
+  why; any successful run (or a skip, which also needs a token) sets it back to 1.
+  Identity-service outages (no `AADSTS` code, network errors) are transient and do not
+  change it.
 - `m365_collector_permission_ok{collector}` is 0 while that collector's last run got a Graph
-  403 (a missing application permission or licence-gated feature). That is a
+  403 (a permission that is in the token but refused, or a licence-gated feature). That is a
   `M365PermissionMissing` warning, not "cannot authenticate".
+- A **skipped** collector (permission not in the token) exports `m365_collector_enabled 0`
+  and `m365_collector_skipped`, but no success, duration or last-success series, so it
+  raises no `CollectorFailing`/`CollectorStale` alerts. Its previous snapshot is dropped.
 - A failed run is retried after 5 min, then 10, 20, 40, capped at 1 h (never later than the
-  normal interval), instead of waiting a full interval (24 h for `appsecrets`).
+  normal interval). A skipped collector re-checks the token at least hourly.
 - After a restart, persisted snapshots are served again and their collection time is
   exported as `m365_collector_last_success_timestamp`, so `M365CollectorStale` still fires
   if the collector keeps failing; `m365_collector_success` appears after the first real run.
 
 Collector notes:
 
-- **users**: `signInActivity` needs `AuditLog.Read.All` *and* Entra ID P1 in the client
-  tenant. If Graph refuses it (403) the collector retries without it, warns once per tenant
-  and sets `m365_tenant_feature{feature="signin_activity"} 0`. Only
-  `lastSuccessfulSignInDateTime` is used: `lastSignInDateTime` and
+- **users**: `m365_user_license` comes from each user's `assignedLicenses`; `skuId` is mapped
+  to `skuPartNumber` with **one** `subscribedSkus` call per run (never `licenseDetails` per
+  user). Without `Organization.Read.All`/`LicenseAssignment.Read.All`, or if that call fails,
+  `sku` falls back to the SKU ID. `signInActivity` needs `AuditLog.Read.All` *and* Entra ID
+  P1. If the token lacks `AuditLog.Read.All` it is not requested at all; if Graph refuses it
+  (403, no P1) the collector retries without it and warns once. Either way
+  `m365_tenant_feature{feature="signin_activity"}` is 0. Only
+  `lastSuccessfulSignInDateTime` is used: `lastSignInDateTime` (the templates' field) and
   `lastNonInteractiveSignInDateTime` also record *failed* attempts, so an abandoned account
   under password spray would look active. Microsoft only populates the successful timestamp
-  for sign-ins since about December 2023, so older activity counts as "never", which is
-  inactive either way. Users with no successful sign-in are caught by
-  `M365UserInactive{signin="never"}` once their account (`createdDateTime`) is older than
-  `inactive_days`.
+  for sign-ins since about December 2023.
+  `m365_user_last_activity_timestamp` is the last successful sign-in, or else the mailbox
+  report's *Last Activity Date* taken from the `mailbox` collector's latest snapshot for the
+  tenant (so it appears from the first `users` run after a `mailbox` run). The same
+  fallback as a query, without that coupling:
+  `m365_user_last_signin_timestamp or on(customer, tenant, upn) m365_mailbox_last_activity_timestamp`.
   Agent identities are excluded with `$filter=not isof('microsoft.graph.agentUser')` (sent as
-  an advanced query with `ConsistencyLevel: eventual` and `$count=true`), plus a client-side
-  `@odata.type` check. If a tenant answers 400 to the filter, the collector stops sending it
-  for that tenant. **Unverified:** `isof` on `/users` is undocumented and `agentUser` is a
-  beta type, so whether agent users are really excluded on v1.0 needs a real tenant (see
-  "Needs a real tenant").
-- **onedrive** fetches its own minimal paged user list
-  (`id,userPrincipalName,accountEnabled,assignedLicenses`) instead of depending on the
-  `users` run. This keeps intervals, failures and `m365c run --collector onedrive`
-  independent, at the cost of one extra paged listing per run. Drive requests run through a
-  worker pool no larger than `per_tenant_concurrency`, and the Graph client takes the
-  per-tenant slot before the global one, so a big tenant's OneDrive run queues behind
-  itself instead of starving other tenants. A 404 (OneDrive not provisioned) skips the user.
-  Other per-user errors (403, 5xx after retries) are logged and skipped. The run fails only
-  if every drive is refused (permission problem) or more than 10 % of users fail.
-  This is one Graph call per licensed user (about 87 % of all calls). If that becomes a
-  problem, `GET /reports/getOneDriveUsageAccountDetail(period='D7')` gives the same numbers
-  in one CSV per tenant (`Reports.Read.All` is already granted), but daily rather than live.
-- **mailbox / mailtraffic** first read `GET /admin/reportSettings`. If
-  `displayConcealedNames` is true they emit `m365_reports_concealed{report=…} 1`, skip the
-  per-user series, log a warning naming the admin-centre setting, and still succeed. Both the
-  flat and the documented `{"value": {…}}` response shapes are accepted; a response without
-  the flag fails the run rather than being read as "not concealed". As a second guard,
-  rows whose UPN has no `@` (hashed IDs) are never exported, and a report where no row has a
-  real UPN is treated as concealed.
-  Report rows with `Is Deleted = True` are skipped; empty dates produce no sample.
-- **servicehealth** exports `status` in camelCase (the enum's spelling) even if Graph returns
-  PascalCase, and the alert regex is case-insensitive as well.
+  an advanced query) plus a client-side `@odata.type` check; a tenant that answers 400 to the
+  filter stops getting it. **Unverified** on v1.0 (see "Needs a real tenant").
+- **onedrive**: `source` per tenant (`onedrive.source`, default from `settings.yaml`):
+  `report` (default) reads one CSV per tenant with `Reports.Read.All` only, as the template
+  did: used, allocated (exported as `_total_bytes`), file count, last activity, display
+  name; deleted OneDrives are skipped. `quota` is the live per-user `/drive` method
+  (`User.Read.All` + `Files.Read.All`; adds recycle-bin bytes, one call per licensed user,
+  worker pool bounded by `per_tenant_concurrency`; a 404 skips the user; the run fails only
+  if every drive is refused or more than 10 % fail). `auto` uses `quota` when the token holds
+  both roles, otherwise `report`. Gating applies to the effective source.
+- **mailbox / mailtraffic / onedrive (report)** use the tenant's report period
+  (`reports.period`: `D7`, `D30`, `D90`, `D180`; the template macro `{$MS.GRAPH.DAYS.BACK}`).
+  Concealed names: if the token holds `ReportSettings.Read.All` they read
+  `GET /admin/reportSettings` (`displayConcealedNames`; flat and `{"value": {…}}` shapes;
+  a response without the flag fails the run rather than being read as "not concealed").
+  Without that permission, or on a 403, concealment is inferred from the report: no UPN
+  contains `@` and at least half look like 32-character hex hashes. Either way
+  `m365_reports_concealed{report, source="setting"|"heuristic"}` is exported, per-user series
+  are skipped when concealed, and the run still succeeds. Rows whose UPN has no `@` are
+  never exported. Rows with `Is Deleted = True` are skipped (counted in
+  `m365_mailbox_deleted`); empty dates produce no sample.
+- **mailtraffic** keeps users with zero or empty counts (exported as 0), as the Liberty
+  template's fix did; CSV parsing is RFC 4180 (quoted display names with commas are fine).
+- **servicehealth** exports `status` in camelCase even if Graph returns PascalCase.
 
-## Entra app registration (once, in the Netwatch tenant)
+## Authentication
+
+Two methods, chosen per tenant:
+
+| method | credential | what it needs |
+|---|---|---|
+| `client_secret` | azure-identity `ClientSecretCredential` | the client's app registration: client ID + a client secret reference |
+| `certificate` | azure-identity `CertificateCredential` | an app registration with an uploaded certificate (the Netwatch multi-tenant app, or a tenant's own) |
+
+New methods (workload identity, federated credentials) plug in as another
+`AuthMethodHandler` in `src/m365c/auth.py` (`AUTH_METHODS`) plus a `method` value in
+`config.py`; nothing else changes.
+
+```yaml
+# settings.yaml: the default for tenants without their own auth block
+app:
+  method: certificate            # certificate (default) | client_secret
+  client_id: 00000000-0000-0000-0000-000000000000
+  # client_secret: file:/run/secrets/default_client_secret   # if method: client_secret
+secrets:
+  cert: file:/run/secrets/m365c_cert   # only needed if some tenant uses the default certificate
+
+# tenants.yaml
+tenants:
+  - id: 11111111-1111-1111-1111-111111111111
+    name: contoso.onmicrosoft.com
+    customer: contoso
+    auth:
+      method: client_secret
+      client_id: 33333333-3333-3333-3333-333333333333
+      client_secret: file:/run/m365c-secrets/contoso_client_secret   # a reference, never the value
+      client_secret_expires: 2027-03-01                              # optional, see below
+    collectors: all
+  - id: 22222222-2222-2222-2222-222222222222
+    name: fabrikam.onmicrosoft.com
+    customer: fabrikam
+    auth:
+      method: certificate
+      cert: vault:secret/fabrikam/m365c#pem      # optional; default: secrets.cert
+      # client_id defaults to app.client_id
+```
+
+- **Backwards compatible.** Files without `method` or tenant `auth` behave exactly as before
+  (certificate, `app.client_id`, `secrets.cert`). `secrets.cert` is optional when no tenant
+  uses it. When a tenant does (or there are no tenants), it is checked at startup and a
+  broken one stops the service, as before; otherwise a broken default certificate is only
+  logged.
+- **References only.** Secrets are given as `file:`, `env:`, `vault:` or `keyvault:`
+  references (see [Secret backends](#secret-backends)). Anything that does not parse as one is
+  treated as a pasted secret and rejected with a validation error that **does not echo it**.
+- **Lazy, per tenant.** A tenant's secret is loaded on its first token request. If it cannot
+  be loaded (missing file, unset variable, Vault error), only that tenant fails:
+  `m365_tenant_auth_ok 0`, `m365_tenant_auth_error{reason="secret_unavailable"}`, one log line
+  naming the backend and the problem (never the value). It is retried on the next cycle.
+- **Rotation.** Credentials are cached under `(tenant, method, client_id, secret
+  fingerprint)`. A `file:` secret's mtime/size is re-checked at most once a minute: replace
+  the file and the next token request builds a new credential (the old one is closed). A
+  changed `auth:` block (hot reload of `tenants.yaml`) re-resolves the secret. A definitive
+  auth failure also re-reads the secret on the next attempt, so a fixed Vault/Key Vault value
+  is picked up without a restart.
+- **Errors.** Identity-service errors are reduced to a known reason and a fixed
+  description; the raw `error_description` (which may echo request data) is never logged or
+  re-raised, and azure-identity's own failure warnings are silenced.
+
+  | Entra error | `reason` | meaning |
+  |---|---|---|
+  | `AADSTS7000215` | `invalid_client_secret` | invalid client secret |
+  | `AADSTS7000222` | `secret_expired` | client secret expired (also raises `M365TenantAuthFailed` with `reason="secret_expired"`) |
+  | `AADSTS700016` | `app_not_found` | app not found in the tenant (wrong client ID, or no consent) |
+  | `AADSTS90002` | `tenant_not_found` | tenant not found |
+  | `AADSTS65001` | `consent_missing` | admin consent missing |
+  | `AADSTS700027` | `invalid_certificate` | certificate not accepted (not uploaded?) |
+  | `AADSTS7000112` | `app_disabled` | application disabled |
+  | other `AADSTS…` | `auth_failed` | |
+  | secret cannot be loaded | `secret_unavailable` | |
+  | Graph 401 | `unauthorized` | |
+
+- **Client secret expiry.** An app cannot read its own secret's expiry without
+  `Application.Read.All`, which the client apps don't have. Put the date from the app
+  registration (*Certificates & secrets → Expires*) in `auth.client_secret_expires`; it is
+  exported as `m365_client_secret_expiry_timestamp` and `M365ClientSecretExpiring` fires 30
+  days before (and after, until renewed).
+
+## Permission gating
+
+Each collector declares `required_permissions` as a list of *any-of* groups (every group
+must be satisfied by one of its roles) and `optional_permissions` that add data. After the
+first successful token for a tenant, m365c decodes the token's `roles` claim locally (the
+token is never logged or printed) and, before every run:
+
+- runs the collector if every required group is satisfied;
+- otherwise skips it: one warning per tenant and collector (`collector_skipped`, naming the
+  missing permission), `m365_collector_enabled 0`,
+  `m365_collector_skipped{reason="missing_permission",permission="A|B"} 1`, and the old
+  snapshot is dropped. Re-checked every run (at least hourly), so newly granted consent is
+  picked up with the next token, without a restart.
+
+`collectors: all` means every collector the tenant's permissions allow. An explicit list
+that names a collector without its permissions logs the warning, skips it and reports it;
+it never crashes. `m365_tenant_permission{permission}` shows, per tenant, which of the roles
+m365c uses are in the token (1) or not (0). A token without a `roles` claim disables gating
+(everything runs, as before).
+
+```sh
+m365c permissions             # required vs optional per collector + minimal parity set
+m365c permissions --parity    # just the four parity permissions
+m365c permissions --all       # flat list of every role any collector can use
+m365c tenant verify contoso   # per collector: runs / skipped (missing X) / what optional adds
+```
+
+## Template parity
+
+The full matrix (every Script item, dependent item, discovery rule, LLD macro and widget of
+both template files → metric → status) is in [`docs/parity.md`](docs/parity.md). Summary:
+
+| Template | Covered by | Status |
+|---|---|---|
+| M365 license audit (SKU discovery, total/used/available) | `license` | ✅ |
+| M365 disabled users (discovery + department, licences, last activity) | `users`: `m365_user_info`, `m365_user_license`, `m365_user_last_activity_timestamp` | ✅ / ⚠️ successful sign-ins only, v1.0 |
+| M365 mailbox discovery / size audit (used, last activity, archive, F1/G3 lists) | `mailbox` + `m365_user_license` (F1/G3 as PromQL) | ✅ / ⚠️ size filter and F1/G3 split are queries |
+| M365 mailbox inactivity audit (D30, `isDeleted`) | `mailbox` with `reports.period`, `m365_mailbox_deleted`, `inactive_days` | ✅ / ⚠️ inactivity is a query |
+| M365 onedrive discovery / size audit (used, allocated, %, free, files, last activity) | `onedrive` `source: report` | ✅ / ⚠️ size filter is a query |
+| M365 send receive audit (+ discovery above `{$MAILS.*}`) | `mailtraffic`, `M365HighMailTraffic` | ✅ / ⚠️ threshold filter is a query |
+| Four dashboard widgets | Grafana row "Template parity" | ✅ |
+
+Everything is collected with **only** the permissions the legacy apps have. The minimal set
+(`m365c permissions --parity`):
+
+```
+Reports.Read.All
+User.Read.All
+AuditLog.Read.All                                     (optional: sign-in activity)
+Organization.Read.All or LicenseAssignment.Read.All
+```
+
+`servicehealth`, `securescore` and `appsecrets` are outside the parity set: they are skipped
+for the legacy apps (and run when the permissions are granted). Size and traffic macros
+became thresholds (`mailbox_size_gb_min`, `onedrive_size_gb_min`, `mail_sent_max`,
+`mail_received_max`, `inactive_days`) exported as `m365_threshold{check}`; dashboards and
+alerts filter on them, nothing is filtered at collection time.
+
+## Entra app registration (Netwatch multi-tenant app, certificate method)
+
+Only needed for tenants that use the shared certificate app. Tenants migrated from Zabbix
+keep their own app registration and client secret (see the next section but one).
 
 1. **Entra admin center → App registrations → New registration**
    - Name: `Netwatch M365 Monitoring`
@@ -138,15 +306,16 @@ Collector notes:
    cat m365c.key m365c.crt > m365c_cert.pem   # what m365c reads: key + cert in one PEM
    ```
 
-   Upload `m365c.crt` only. Do **not** create client secrets; m365c does not support them.
-3. **API permissions → Add a permission → Microsoft Graph → Application permissions.** Add
-   exactly the output of `m365c permissions`:
+   Upload `m365c.crt` only. The key must be RSA (azure-identity signs with RS256).
+3. **API permissions → Add a permission → Microsoft Graph → Application permissions.** For
+   every collector, grant `m365c permissions --all`:
 
    ```
    Application.Read.All
    AuditLog.Read.All
    Files.Read.All
    LicenseAssignment.Read.All
+   Organization.Read.All          (alternative to LicenseAssignment.Read.All; one is enough)
    ReportSettings.Read.All
    Reports.Read.All
    SecurityEvents.Read.All
@@ -154,25 +323,37 @@ Collector notes:
    User.Read.All
    ```
 
-   Grant admin consent in the Netwatch tenant too if you monitor it. No directory role
-   (e.g. Global Reader) is needed: application permissions are enough.
+   Anything less is fine: collectors without their permissions are skipped. No directory role
+   is needed.
 4. Put the **Application (client) ID** in `settings.yaml` → `app.client_id`.
 
 ## Client onboarding
 
-1. Add the tenant and get the consent link:
+1. Add the tenant:
 
    ```sh
+   # shared certificate app (default auth from settings.yaml)
    m365c tenant add --tenant-id <tenant-guid> --name contoso.onmicrosoft.com --customer contoso
+   # the client's own app registration with a client secret
+   m365c tenant add --tenant-id <tenant-guid> --name contoso.onmicrosoft.com --customer contoso \
+     --auth client-secret --client-id <app-guid> \
+     --client-secret-ref file:/run/m365c-secrets/contoso_client_secret \
+     --client-secret-expires 2027-03-01
+   # a tenant-specific certificate
+   m365c tenant add ... --auth certificate [--client-id <app-guid>] --cert-ref vault:secret/contoso/m365c#pem
    ```
 
-   This appends to `tenants.yaml` (hot reloaded) and prints
-   `https://login.microsoftonline.com/<tenant>/adminconsent?client_id=<client_id>`.
-2. A **Global Administrator** (or Privileged Role Administrator) of the client opens the link
-   and accepts. This creates the enterprise app in their tenant with the permissions above.
-3. **Turn off report concealment**, otherwise mailbox and mail traffic metrics are skipped:
-   Microsoft 365 admin center → **Settings → Org settings → Services → Reports** → clear
-   *Display concealed user, group, and site names in all reports*.
+   `tenant add` writes the tenant's `auth:` block and **never accepts a literal secret**: the
+   secret options take references only, and a value that is not a reference is refused
+   without being echoed. It appends to `tenants.yaml` (hot reloaded) and prints the
+   admin-consent URL for the effective client ID.
+2. For the shared app, a **Global Administrator** (or Privileged Role Administrator) of the
+   client opens the consent link and accepts. Apps used by the Zabbix templates are already
+   consented.
+3. **Turn off report concealment** (or grant `ReportSettings.Read.All` so m365c can say
+   why per-user report series are missing): Microsoft 365 admin center → **Settings → Org
+   settings → Services → Reports** → clear *Display concealed user, group, and site names in
+   all reports*.
 4. **Verify:**
 
    ```sh
@@ -180,30 +361,155 @@ Collector notes:
    ```
 
    ```
-   tenant                   check        detail
-   contoso.onmicrosoft.com  token        ✅  token acquired
-   contoso.onmicrosoft.com  permissions  ✅  9 required roles granted
-   contoso.onmicrosoft.com  reports      ✅  report names not concealed
-   contoso.onmicrosoft.com  signin       ✅  signInActivity available
+   tenant                   check                  detail
+   contoso.onmicrosoft.com  auth               ✅  client_secret, client 33333333-…
+   contoso.onmicrosoft.com  token              ✅  token acquired
+   contoso.onmicrosoft.com  permissions        ✅  granted: AuditLog.Read.All, Organization.Read.All, Reports.Read.All, User.Read.All
+   contoso.onmicrosoft.com  collector license  ✅  runs
+   contoso.onmicrosoft.com  collector users    ✅  runs
+   contoso.onmicrosoft.com  collector mailbox  ✅  runs; optional: ReportSettings.Read.All would add …
+   contoso.onmicrosoft.com  collector onedrive ✅  runs (source report); optional: Files.Read.All would add …
+   contoso.onmicrosoft.com  collector servicehealth ➖  skipped: missing ServiceHealth.Read.All
+   contoso.onmicrosoft.com  reports            ➖  ReportSettings.Read.All not granted: concealment is inferred from report data
+   contoso.onmicrosoft.com  signin             ✅  signInActivity available
    ```
 
-   `signin` ❌ usually means the tenant has no Entra ID P1; the `users` collector still works,
-   only `m365_user_last_signin_timestamp` is missing. Permissions are read from the token's
-   `roles` claim, decoded locally and never printed.
+   ❌ (exit code 1) means something must be fixed: no token (with the mapped reason), a
+   collector listed explicitly in `collectors:` that cannot run, concealed report names, or
+   signInActivity refused. `➖` is informational.
+
+## Migrating from the Zabbix templates
+
+Per client, the Zabbix templates hold the app registration's IDs and secret in macros:
+`{$MS.GRAPH.TENANT.ID}`, `{$MS.GRAPH.CLIENT.ID}` and `{$MS.GRAPH.CLIENT.SECRET}` (plus
+`{$MS.GRAPH.DAYS.BACK}`, `{$MS.GRAPH.MAILBOX.SIZE.GB}`, `{$MS.GRAPH.ONEDRIVE.SIZE.GB}`,
+`{$MAILS.SENT}`, `{$MAILS.RECEIVED}`, `{$MS.GRAPH.DAYS.INACTIVE}`). They are set on the
+per-client **template** copies (as in the exports), on **hosts**, or globally; a host macro
+overrides a template macro, which overrides a global one.
+
+### 1. Find each client's IDs and secret
+
+The Zabbix UI and API never show `SECRET_TEXT` values, but the database stores them in
+clear text (`type = 1`). `type = 2` is a **vault** macro: the value is a vault path
+(`path/to/secret:key`), and the secret itself must be read from that vault. `type = 0` is
+plain text. Templates are rows in `hosts` with `status = 3`.
+
+MySQL / MariaDB and PostgreSQL (same SQL):
+
+```sql
+-- template and host macros
+SELECT h.host, CASE h.status WHEN 3 THEN 'template' ELSE 'host' END AS kind,
+       hm.macro, hm.type, CASE WHEN hm.type = 1 THEN '<secret>' ELSE hm.value END AS value
+FROM hostmacro hm
+JOIN hosts h ON h.hostid = hm.hostid
+WHERE hm.macro IN ('{$MS.GRAPH.TENANT.ID}', '{$MS.GRAPH.CLIENT.ID}', '{$MS.GRAPH.CLIENT.SECRET}',
+                   '{$MS.GRAPH.DAYS.BACK}', '{$MAILS.SENT}', '{$MAILS.RECEIVED}',
+                   '{$MS.GRAPH.MAILBOX.SIZE.GB}', '{$MS.GRAPH.ONEDRIVE.SIZE.GB}')
+ORDER BY h.host, hm.macro;
+
+-- global macros
+SELECT macro, type, CASE WHEN type = 1 THEN '<secret>' ELSE value END AS value
+FROM globalmacro
+WHERE macro LIKE '{$MS.GRAPH.%' OR macro LIKE '{$MAILS.%';
+```
+
+This lists everything but the secrets. Note each client's tenant ID, client ID and which
+host/template holds the secret.
+
+### 2. Write the secret to a file (0600, never on screen)
+
+Read one secret straight into a file, so it never appears in the terminal or in shell
+history. Put the SQL in a file (the `{$…}` macro names would otherwise need shell escaping):
+
+```sh
+umask 077
+mkdir -p deploy/secrets/tenants
+cat > /tmp/secret.sql <<'SQL'
+SELECT hm.value FROM hostmacro hm JOIN hosts h ON h.hostid = hm.hostid
+WHERE h.host = 'M365 send receive audit' -- the template/host that holds the client's secret
+  AND hm.macro = '{$MS.GRAPH.CLIENT.SECRET}' AND hm.type = 1;
+SQL
+# MySQL / MariaDB
+mysql --batch --skip-column-names -u zabbix -p zabbix < /tmp/secret.sql \
+  | tr -d '\n' > deploy/secrets/tenants/contoso_client_secret
+# PostgreSQL
+psql -At -U zabbix -d zabbix -f /tmp/secret.sql \
+  | tr -d '\n' > deploy/secrets/tenants/contoso_client_secret
+rm /tmp/secret.sql
+chmod 0400 deploy/secrets/tenants/contoso_client_secret
+sudo chown 10001 deploy/secrets/tenants/contoso_client_secret   # the container user
+test -s deploy/secrets/tenants/contoso_client_secret && echo "written, $(wc -c < deploy/secrets/tenants/contoso_client_secret) bytes"
+```
+
+For a vault macro (`type = 2`), read the secret from that vault instead, or point m365c at
+it directly: `client_secret: vault:<mount>/<path>#<key>` (HashiCorp KV v2) or
+`keyvault:https://<kv>.vault.azure.net/<name>`. `env:VAR` works too (Docker `env_file`,
+systemd `EnvironmentFile=`), but environment variables are visible to anyone who can inspect
+the container; prefer files or a vault.
+
+Look up the secret's expiry in the client's app registration (*Certificates & secrets*) for
+`--client-secret-expires`. The secret has been stored in clear text in the Zabbix database:
+consider rotating it once the migration is done (create a new secret, replace the file,
+delete the old secret in Entra).
+
+### 3. Add and verify the tenant
+
+```sh
+m365c tenant add --tenant-id <tenant id> --name <domain> --customer <slug> \
+  --auth client-secret --client-id <client id> \
+  --client-secret-ref file:/run/m365c-secrets/<slug>_client_secret \
+  --client-secret-expires <YYYY-MM-DD>
+m365c tenant verify <slug>
+```
+
+If the template used another `{$MS.GRAPH.DAYS.BACK}` than `D7`, set it on the tenant
+(`reports: {period: D30}` in `tenants.yaml`). Put the size/traffic macros in
+`thresholds.yaml` under `customers.<slug>`.
+
+### 4. Compare side by side (run both for a few days)
+
+| Zabbix item (per discovered host) | m365c query |
+|---|---|
+| `sku.total.licenses[…]` / `sku.used.licenses[…]` / `available.licenses[…]` | `m365_license_total{sku=…}` / `m365_license_consumed` / `m365_license_available` |
+| Disabled user: `Disabled.department`, `Disabled.licenses`, `Disabled.lastactivity` | `m365_user_info{enabled="false",licensed="true"}`, `m365_user_license{upn=…}`, `m365_user_last_activity_timestamp{upn=…}` (Zabbix used *any* sign-in attempt; expect m365c's date to be equal or older) |
+| Mailbox: `mail.used.storage`, `mail.last.activity` | `m365_mailbox_used_bytes{upn=…}`, `m365_mailbox_last_activity_timestamp{upn=…}` |
+| Discovered mailboxes (≥ `{$MS.GRAPH.MAILBOX.SIZE.GB}`) | `m365_mailbox_used_bytes >= on(customer,tenant) group_left() (m365_threshold{check="mailbox_size_gb_min"} * 1073741824)` |
+| *M365 Mailbox Size – F1* / *– G3* | `m365_mailbox_used_bytes * on(customer,tenant,upn) group_left() (max by (customer,tenant,upn) (m365_user_license{sku="M365_F1_GOV"}) unless on(customer,tenant,upn) m365_user_license{sku="M365_G3_GOV"})` (swap SKUs for G3) |
+| OneDrive: `onedrive.used`, `onedrive.total`, `onedrive.filecount`, `onedrive.lastactivity` | `m365_onedrive_used_bytes`, `m365_onedrive_total_bytes`, `m365_onedrive_file_count`, `m365_onedrive_last_activity_timestamp` |
+| `onedrive.free.storage`, `onedrive.pused.storage` | `m365_onedrive_total_bytes - m365_onedrive_used_bytes`, `m365_onedrive_used_bytes / m365_onedrive_total_bytes` |
+| `sent.mails`, `recieved.mails` | `m365_mail_sent{upn=…}`, `m365_mail_received{upn=…}` (same `period`) |
+| Discovered high-traffic users | `M365HighMailTraffic` alert / "Emails sent/received" table |
+
+Expect m365c to list **more** users than Zabbix for large tenants: the templates read only
+the first page of `/users` and of each report.
+
+### 5. Turn off the Zabbix templates
+
+When the numbers match and `m365_collector_success` has been 1 for every parity collector
+for a few days: in Zabbix, disable the client's M365 hosts (or unlink the M365 templates
+from them and delete the discovered hosts), then remove the `{$MS.GRAPH.CLIENT.SECRET}`
+macros so the secret no longer sits in the Zabbix database. Keep the Zabbix history if you
+need it for comparison; m365c does not import it.
 
 ## Configuration reference
 
 Three files in the config directory (`--config-dir`, `M365C_CONFIG_DIR`, default `./config`;
 `/etc/m365c` in the container). Examples are in `config/*.example.yaml`; real files are
-git-ignored. All config is validated at startup; errors name the file and the key.
+git-ignored. All config is validated at startup; errors name the file and the key, never a
+secret value.
 
 **`settings.yaml`** (read at startup)
 
 | key | default | meaning |
 |---|---|---|
-| `app.client_id` | required | Application (client) ID of the multi-tenant app |
-| `secrets.cert` | required | secret reference of the PEM (key + cert) or PKCS#12 |
-| `secrets.cert_password` | none | secret reference of the key/PFX password, if encrypted |
+| `app.method` | `certificate` | default auth method: `certificate` or `client_secret` |
+| `app.client_id` | required | default Application (client) ID |
+| `app.client_secret` | none | secret reference, required if `app.method: client_secret` |
+| `app.client_secret_expires` | none | expiry date of that secret (`YYYY-MM-DD`) |
+| `secrets.cert` | none | reference of the default PEM (key + cert) or PKCS#12; needed only if a tenant uses it |
+| `secrets.cert_password` | none | reference of the key/PFX password, if encrypted |
+| `reports.period` | `D7` | report period for mailbox, mailtraffic and onedrive (report): `D7`, `D30`, `D90`, `D180` |
+| `onedrive.source` | `report` | `report`, `quota` or `auto` |
 | `http.max_concurrency` | 20 | concurrent Graph requests, all tenants |
 | `http.per_tenant_concurrency` | 4 | concurrent Graph requests per tenant |
 | `http.timeout_s` | 60 | per request |
@@ -214,33 +520,46 @@ git-ignored. All config is validated at startup; errors name the file and the ke
 | `intervals.<collector>` | collector default | e.g. `mailbox: 12h` (`s`, `m`, `h`, `d`) |
 
 **`tenants.yaml`** (hot reloaded: added tenants start collecting, removed or disabled ones
-are dropped from the cache and `/metrics`, including their Graph counters). A change is
-applied once the file has been unchanged for one poll (`reload_interval`), so half-written
-saves are not picked up. An invalid, unreadable or empty file is logged and ignored, and the
-last good configuration stays. The `tenants:` key is required: write `tenants: []` to run
-with no tenants. An accidentally emptied file therefore never drops every customer.
-`m365c tenant add` validates first, then replaces the file atomically. It rewrites the YAML,
-so comments in `tenants.yaml` are not kept.
+are dropped from the cache and `/metrics`, including their Graph counters; a changed `auth:`
+block gets a new credential). A change is applied once the file has been unchanged for one
+poll, so half-written saves are not picked up. An invalid, unreadable or empty file, or one
+whose auth cannot be resolved (e.g. certificate auth without any certificate), is logged and
+ignored, and the last good configuration stays. The `tenants:` key is required: write
+`tenants: []` to run with no tenants. `m365c tenant add` validates first, then replaces the
+file atomically (comments are not kept).
 
 ```yaml
 tenants:
   - id: 11111111-1111-1111-1111-111111111111
     name: contoso.onmicrosoft.com   # `tenant` label
     customer: contoso               # `customer` label, lowercase slug
+    auth:                           # optional; default: settings.yaml app:
+      method: client_secret         # client_secret | certificate
+      client_id: 33333333-3333-3333-3333-333333333333
+      client_secret: file:/run/m365c-secrets/contoso_client_secret
+      client_secret_expires: 2027-03-01
+      # certificate: cert: <ref>, cert_password: <ref> (both optional)
+    reports:
+      period: D30                   # optional; default: settings reports.period
+    onedrive:
+      source: report                # optional; default: settings onedrive.source
     collectors: all                 # or [license, users, ...]
     enabled: true
 ```
 
 **`thresholds.yaml`** (hot reloaded). Exported as `m365_threshold{customer,tenant,check}`;
-the alert rules join against it, so changing a threshold needs no Prometheus reload.
+alert rules and dashboards join against it, so changing a threshold needs no Prometheus
+reload.
 
 ```yaml
 defaults:
   license_util_warn: 0.95
   storage_used_warn: 0.90
-  inactive_days: 30
-  mail_sent_max_7d: 800
-  mail_received_max_7d: 800
+  inactive_days: 30          # {$MS.GRAPH.DAYS.INACTIVE}
+  mail_sent_max: 800         # {$MAILS.SENT}, over the report period (old key mail_sent_max_7d accepted)
+  mail_received_max: 800     # {$MAILS.RECEIVED} (old key mail_received_max_7d accepted)
+  mailbox_size_gb_min: 10    # {$MS.GRAPH.MAILBOX.SIZE.GB}: dashboard filter
+  onedrive_size_gb_min: 1    # {$MS.GRAPH.ONEDRIVE.SIZE.GB}: dashboard filter
 customers:
   contoso:
     storage_used_warn: 0.85   # overrides the default for this customer only
@@ -248,23 +567,24 @@ customers:
 
 **Environment overrides.** Every value can be overridden with `M365C_` and `__` for
 nesting: `M365C_HTTP__MAX_CONCURRENCY=10`, `M365C_SECRETS__CERT=file:/run/secrets/x`,
-`M365C_CACHE__PERSIST_DIR=/var/lib/m365c/cache`, `M365C_TENANTS='[{"id": …}]'` (JSON),
-`M365C_THRESHOLDS_DEFAULTS__INACTIVE_DAYS=45`. Environment beats YAML, so a
-`M365C_TENANTS` or `M365C_THRESHOLDS_*` variable makes edits to the hot-reloaded file appear
-to do nothing; the service logs a warning at startup when one is set. Logging:
-`M365C_LOG_LEVEL` (default `INFO`).
+`M365C_REPORTS__PERIOD=D30`, `M365C_CACHE__PERSIST_DIR=/var/lib/m365c/cache`,
+`M365C_TENANTS='[{"id": …}]'` (JSON), `M365C_THRESHOLDS_DEFAULTS__INACTIVE_DAYS=45`.
+Environment beats YAML, so a `M365C_TENANTS` or `M365C_THRESHOLDS_*` variable makes edits to
+the hot-reloaded file appear to do nothing; the service logs a warning at startup when one is
+set. Logging: `M365C_LOG_LEVEL` (default `INFO`).
 
 ## Secret backends
 
-The certificate is loaded once into memory. It is never written to disk or logged. At
-startup it is parsed and checked (key present, certificate matches the key, password right),
-so a broken certificate stops `m365c serve` with a clear error instead of failing every token
-request later. Its expiry is logged (warning within 30 days, error if expired) and exported
-as `m365_cert_expiry_timestamp`, which drives `M365CertificateExpiring`.
+Secrets are loaded into memory only, never written to disk or logged; every loaded value is
+also registered with the log redactor, which scrubs it (and its URL-encoded forms) from any
+log line. A certificate is parsed and checked when loaded (key present, matches the
+certificate, password right). The default certificate's expiry is logged at startup
+(warning within 30 days, error if expired) and exported as `m365_cert_expiry_timestamp`.
 
 | reference | backend | needs |
 |---|---|---|
-| `file:/run/secrets/m365c_cert` | file | nothing (default, used by Compose secrets) |
+| `file:/run/secrets/m365c_cert` | file | nothing (Compose secrets, bind mounts); a trailing newline is stripped from client secrets |
+| `env:M365C_CONTOSO_SECRET` | environment variable | nothing (Docker `env_file`, systemd `EnvironmentFile=`) |
 | `vault:secret/m365c/cert#pem` | HashiCorp Vault KV v2: mount `secret`, path `m365c/cert`, key `pem` | `pip install m365c[vault]`; `VAULT_ADDR`; AppRole (`VAULT_ROLE_ID`, `VAULT_SECRET_ID`) or Kubernetes (`VAULT_K8S_ROLE`, optional `VAULT_K8S_TOKEN_PATH`, `VAULT_K8S_MOUNT`) or `VAULT_TOKEN`; optional `VAULT_NAMESPACE` |
 | `keyvault:https://<kv>.vault.azure.net/<name>` | Azure Key Vault secret (a Key Vault *certificate* is readable as a secret of the same name; PKCS#12 is base64-decoded automatically) | `pip install m365c[azure]`; `DefaultAzureCredential` (managed identity, workload identity, `AZURE_*` env) |
 
@@ -277,14 +597,16 @@ No downtime, no client involvement (consent is per app, not per certificate):
 1. Create a new key pair (see above) and **upload the new certificate** to the app
    registration. Keep the old one; both are now valid.
 2. **Switch the secret**: replace `deploy/secrets/m365c_cert.pem` (or the Vault/Key Vault
-   value) and restart the collector: `docker compose -f deploy/docker-compose.yml up -d
-   --force-recreate collector`.
-3. **Verify**: the startup log shows `certificate_loaded` with the new thumbprint, and
-   `m365_cert_expiry_timestamp{thumbprint=…}` shows the new one. Run
-   `m365c tenant verify <customer>` for a few tenants, and check in Prometheus that
-   `min(m365_tenant_auth_ok) == 1` within about 5 minutes (the `M365TenantAuthFailed` alert
-   stays quiet).
+   value). A `file:` certificate is picked up within a minute per tenant; restart the
+   collector (`docker compose -f deploy/docker-compose.yml up -d --force-recreate collector`)
+   to refresh `m365_cert_expiry_timestamp` and the startup check.
+3. **Verify**: `m365c tenant verify <customer>` for a few tenants, and check in Prometheus
+   that `min(m365_tenant_auth_ok) == 1` (the `M365TenantAuthFailed` alert stays quiet).
 4. **Remove the old certificate** from the app registration.
+
+Client secrets rotate the same way: add a new secret in the client's app registration,
+replace the tenant's secret file (picked up within a minute, no restart), update
+`auth.client_secret_expires`, then delete the old secret in Entra.
 
 ## Deploy
 
@@ -293,7 +615,8 @@ cp config/settings.example.yaml config/settings.yaml      # set app.client_id
 cp config/thresholds.example.yaml config/thresholds.yaml
 m365c -c config tenant add ...                             # or copy tenants.example.yaml
 # secrets (git-ignored), see deploy/secrets/README.md
-cp m365c_cert.pem deploy/secrets/m365c_cert.pem
+cp m365c_cert.pem deploy/secrets/m365c_cert.pem            # only if a tenant uses the default cert
+#   per-tenant client secrets: deploy/secrets/tenants/<customer>_client_secret (uid 10001, 0400)
 openssl rand -base64 24 > deploy/secrets/grafana_admin_password
 printf '%s' 'smtp-password' > deploy/secrets/alertmanager_smtp_password
 printf '%s' 'https://hooks.example/...' > deploy/secrets/alertmanager_webhook_contoso
@@ -302,23 +625,24 @@ docker compose -f deploy/docker-compose.yml up -d --build
 
 - Collector: `:9365/metrics`, `/healthz` (process up), `/readyz` (config loaded and at least
   one collector run attempted, or no tenants configured). Not published on the host by
-  default. `/metrics` is rendered off the event loop, so a large scrape doesn't stall Graph
-  calls or the healthcheck. The image healthcheck follows `M365C_SERVER__PORT`.
+  default. `/metrics` is rendered off the event loop. The image healthcheck follows
+  `M365C_SERVER__PORT`. Per-tenant client secrets are bind-mounted from
+  `deploy/secrets/tenants/` at `/run/m365c-secrets/`. With client-secret tenants only, remove
+  the `M365C_SECRETS__CERT` line and the `m365c_cert` secret from the Compose file.
 - Prometheus `127.0.0.1:9090` (scrapes every 60s, rules in `deploy/prometheus/rules/m365.yml`),
   Alertmanager `127.0.0.1:9093`, Grafana `127.0.0.1:3000` (dashboard *Microsoft 365 overview*,
-  `customer` and `tenant` variables). Put a reverse proxy with TLS in front for remote access.
+  `customer` and `tenant` variables, with a **Template parity** row). Put a reverse proxy
+  with TLS in front for remote access.
 - Alloy ships container logs labelled `logs.netwatch/ship=true` to Loki, with `level`,
-  `customer` and `collector` extracted as labels. Alloy does not mount the Docker socket
-  (root-equivalent on the host). It talks to a `docker-socket-proxy` that only allows
-  `GET /containers/*` and `GET /networks`; any POST is refused (checked: 403).
+  `customer` and `collector` extracted as labels. Alloy talks to a `docker-socket-proxy` that
+  only allows `GET /containers/*` and `GET /networks`, not the Docker socket.
 
 **Personal data.** Logs and the snapshot cache contain user principal names, and the cache
-also holds display names and departments (`m365_user_info`). With `cache.persist_dir` set
-(on by default in Compose: the `m365c-cache` volume at `/var/lib/m365c/cache`), they are
-stored as JSON files, one per tenant and collector, created with mode 0600. A file is
-replaced on every successful run and deleted when its tenant or collector is removed. Files
-of tenants removed while the service was down are deleted at the next start. Loki keeps logs
-for 30 days (`retention_period: 720h`). Treat both volumes as customer data:
+also holds display names, departments and licences (`*_info`, `m365_user_license`). With
+`cache.persist_dir` set (on by default in Compose: the `m365c-cache` volume), they are stored
+as JSON files, one per tenant and collector, mode 0600, replaced on every successful run and
+deleted when the tenant or collector is removed (also for tenants removed while the service
+was down). Loki keeps logs for 30 days. Treat both volumes as customer data:
 `docker compose down -v` removes them.
 - Alertmanager groups by `customer, alertname` and has an example per-customer route
   (email + webhook). All credentials are `*_file` references to Compose secrets.
@@ -328,22 +652,30 @@ for 30 days (`retention_period: 720h`). Treat both volumes as customer data:
 | Alert | Fires when | Severity |
 |---|---|---|
 | `M365LicenseNearlyExhausted` | consumed/total > `license_util_warn` | warning |
-| `M365LicenseExhausted` | available ≤ 0 and total > 0 (normal for many small clients, so warning) | warning |
-| `M365MailboxNearlyFull` / `M365OneDriveNearlyFull` | used/quota > `storage_used_warn` | warning |
+| `M365LicenseExhausted` | available ≤ 0 and total > 0 | warning |
+| `M365MailboxNearlyFull` / `M365OneDriveNearlyFull` | used/quota (OneDrive: allocated) > `storage_used_warn` | warning |
 | `M365DisabledUserLicensed` | disabled users hold licences, for 1d | warning |
-| `M365UserInactive` | licensed, enabled user: last successful sign-in older than `inactive_days` (`signin="stale"`), or never signed in and account older than `inactive_days` (`signin="never"`); only where signInActivity is available | info |
-| `M365HighMailTraffic` | sent or received over threshold (`direction` label) | warning |
-| `M365ServiceDegraded` | a service is degraded/interrupted/investigating (case-insensitive) | warning |
-| `M365AppCredentialExpiring` | a secret/certificate expires within 30 days. Already-expired credentials don't alert (they'd fire for ever); they are listed on the dashboard | warning |
-| `M365TenantAuthFailed` | token failure or Graph 401 | critical |
+| `M365UserInactive` | licensed, enabled user past `inactive_days` since the last successful sign-in (`signin="stale"`) or never signed in with an older account (`signin="never"`); only where signInActivity is available | info |
+| `M365HighMailTraffic` | sent or received over `mail_sent_max`/`mail_received_max` (`direction`, `period` labels) | warning |
+| `M365ServiceDegraded` | a service is degraded/interrupted/investigating | warning |
+| `M365AppCredentialExpiring` | an app secret/certificate in the tenant expires within 30 days (needs `Application.Read.All`) | warning |
+| `M365ClientSecretExpiring` | the tenant's own client secret (`auth.client_secret_expires`) expires within 30 days or has expired | warning |
+| `M365TenantAuthFailed` | token failure or Graph 401; `reason` label from `m365_tenant_auth_error` (`secret_expired`, `invalid_client_secret`, `secret_unavailable`, …) with matching guidance | critical |
 | `M365PermissionMissing` | a collector got Graph 403 | warning |
-| `M365ReportsConcealed` | report names concealed | warning |
+| `M365ReportsConcealed` | report names concealed (setting or heuristic) | warning |
 | `M365CollectorFailing` | last run failed, for 3h | warning |
 | `M365CollectorStale` | no success for 2× the collector's interval | warning |
 | `M365CollectorDown` | Prometheus cannot scrape the collector (`customer="netwatch"`) | critical |
-| `M365CertificateExpiring` | the app certificate expires within 30 days (`customer="netwatch"`) | critical |
+| `M365CertificateExpiring` | the default certificate expires within 30 days (`customer="netwatch"`) | critical |
 
-Each has `customer`, `tenant` and a `summary` naming the user, SKU, app or service.
+**What goes quiet when a collector is skipped** (e.g. for the legacy apps, which have only
+the parity permissions): `M365ServiceDegraded` (servicehealth), `M365AppCredentialExpiring`
+(appsecrets; use `M365ClientSecretExpiring`), secure-score panels, and `M365UserInactive`
+without `AuditLog.Read.All` + Entra ID P1. Skipped collectors never fire
+`CollectorFailing`/`CollectorStale`; they are listed in the dashboard's "Collectors skipped"
+table and by `m365_collector_enabled == 0`.
+
+Each alert has `customer`, `tenant` and a `summary` naming the user, SKU, app or service.
 Alertmanager inhibits `CollectorFailing`/`CollectorStale`/`PermissionMissing` while
 `TenantAuthFailed` fires for the same tenant.
 
@@ -352,7 +684,7 @@ Alertmanager inhibits `CollectorFailing`/`CollectorStale`/`PermissionMissing` wh
 in `deploy/prometheus/tests/m365_test.yml`), `amtool check-config`, and parses every
 dashboard query with promtool. It uses a local promtool/amtool if one is installed,
 otherwise the official images through Docker. Without either it skips locally, but **fails
-when `CI` is set**, so CI needs Docker or promtool. By hand:
+when `CI` is set**. By hand:
 
 ```sh
 docker run --rm -v "$PWD/deploy/prometheus:/p" -w /p --entrypoint promtool prom/prometheus:v3.5.0 check rules rules/m365.yml
@@ -367,17 +699,20 @@ The dashboard JSON is generated: edit `deploy/grafana/gen_dashboard.py`, then ru
 
 ```
 m365c serve                                   # the service (container default)
-m365c permissions                             # Graph application permissions to grant
+m365c permissions [--parity | --all]          # required/optional per collector, parity set
 m365c tenant add --tenant-id <guid> --name <domain> --customer <slug>
+                 [--auth client-secret --client-id <guid> --client-secret-ref <ref>
+                  [--client-secret-expires YYYY-MM-DD]]
+                 [--auth certificate [--client-id <guid>] [--cert-ref <ref>] [--cert-password-ref <ref>]]
 m365c tenant list
 m365c tenant verify <customer|tenant-name|tenant-id>
 m365c run --tenant <x> [--collector <name> ...] [--dry-run] [--json]
 ```
 
 Global options: `-c/--config-dir`, `--log-level`. `run --dry-run` writes neither the cache
-nor the persistence directory. `serve`, `run` and `tenant verify` accept a hidden
-`--fixtures <dir>` that serves Graph from fixture files with a fake token, for offline demos
-and for testing the deploy stack end to end without a tenant:
+nor the persistence directory; skipped collectors are shown with the missing permission.
+`serve`, `run` and `tenant verify` accept a hidden `--fixtures <dir>` that serves Graph from
+fixture files with a fake token (holding every role), for offline demos:
 
 ```sh
 uv run m365c -c tests/fixtures/config run --tenant contoso --dry-run --fixtures tests/fixtures/graph
@@ -392,60 +727,148 @@ uv sync --all-extras          # Python 3.12 venv with dev tools
 uv run pytest                 # offline: Graph and token traffic are mocked
 uv run ruff check
 uv run ruff format --check
-uv run mypy src               # strict
+uv run mypy                   # strict
 docker compose -f deploy/docker-compose.yml config --quiet
 ```
 
+On Windows machines where Application Control blocks the `pytest.exe`/`mypy.exe` shims,
+use `uv run python -m pytest` and `uv run python -m mypy`.
+
 Layout: `src/m365c/` (package), `tests/` (fixtures in `tests/fixtures/graph`, fake data
-only), `config/` (examples), `deploy/` (Compose stack, Prometheus rules, Alertmanager,
-Grafana, Loki, Alloy).
+only; `tests/identity.py` is a fake Entra token endpoint for real azure-identity
+credentials), `config/` (examples), `deploy/` (Compose stack, Prometheus rules,
+Alertmanager, Grafana, Loki, Alloy), `docs/parity.md` (template parity matrix).
 
 Adding a collector: subclass `BaseCollector` in `src/m365c/collectors/` with `name`,
-`default_interval`, `required_permissions`, `metric_help` and `async collect(ctx)`, register it
-in `collectors/__init__.py`, add fixtures and a test, then update the permission list above.
+`default_interval`, `required_permissions` (any-of groups), `optional_permissions`,
+`metric_help` and `async collect(ctx)` (use `ctx.roles`, `ctx.options`, `ctx.granted()`),
+register it in `collectors/__init__.py`, add fixtures and a test.
 
-## Deviations from the handover spec
+## Deviations from the handover specs
+
+From the original build:
 
 | Spec | Implementation | Why |
 |---|---|---|
 | Retry 429 and 503/504 | Also retries 500, 502 and network errors (same backoff) | Transient Graph errors; one blip shouldn't fail a daily run |
-| `m365_reports_concealed` with `customer`, `tenant` | Extra `report` label (`mailbox` / `mailtraffic`) | Both collectors emit it; identical label sets would make Prometheus reject the whole scrape |
-| `m365_tenant_auth_ok` 0 on any `GraphAuthError` | 0 on definitive token failures and Graph 401; a 403 sets `m365_collector_permission_ok{collector}` 0 instead | A single missing permission is not "cannot authenticate", and the old rule kept the alert firing for up to 24 h after a fix (review M4) |
-| Last sign-in timestamp | `lastSuccessfulSignInDateTime` only, plus `m365_user_created_timestamp` | The other fields include failed attempts; never-signed-in users need a signal (review H4) |
+| `m365_reports_concealed` with `customer`, `tenant` | Extra `report` label (and now `source`) | Several collectors emit it; identical label sets would make Prometheus reject the scrape |
+| `m365_tenant_auth_ok` 0 on any `GraphAuthError` | 0 on definitive token failures and Graph 401; a 403 sets `m365_collector_permission_ok{collector}` 0 instead | A single refused permission is not "cannot authenticate" |
+| Last sign-in timestamp | `lastSuccessfulSignInDateTime` only, plus `m365_user_created_timestamp` | The other fields include failed attempts |
 | `securescore` `$top=1` | `$top=7`, newest by `createdDateTime` | The order isn't documented |
-| `M365LicenseExhausted` `available == 0`, critical | `available <= 0` (over-assignment), severity warning | Fully assigned SKUs are normal for small clients |
+| `M365LicenseExhausted` `available == 0`, critical | `available <= 0`, warning | Fully assigned SKUs are normal for small clients |
 | `M365AppCredentialExpiring` `< 30d` | `0 < remaining < 30d` | Expired, never-removed secrets would alert for ever |
 | `M365CollectorStale` "2× interval, or 2d" | Uses exported `m365_collector_interval_seconds` | Exact per collector |
-| Built-in metrics | Extra `m365_collector_interval_seconds`, `m365_collector_permission_ok`, `m365_exporter_duplicate_series`, `m365_cert_expiry_timestamp` | See health semantics above |
-| Alerts | Extra `M365CollectorDown`, `M365PermissionMissing`, `M365CertificateExpiring` | Cover the exporter itself, permissions and our own certificate |
-| Settings | Extra `secrets.cert_password`, `reload_interval` | Encrypted keys / PFX; configurable reload |
 | Failed runs wait a full interval | Retry backoff 5 min → 1 h | One transient failure no longer means a 24 h gap |
 | Log shipping via the Docker socket | Via a read-only docker-socket-proxy | The socket is root-equivalent |
 | Build backend unspecified | `uv_build` | hatchling's build env deadlocked uv's cache lock on the dev machine |
 | — | Hidden `--fixtures` on `serve`, `run`, `tenant verify` | Offline demos and end-to-end stack tests |
 
+From the parity refactor (`m365-collector-parity-handover.md`):
+
+| Spec / previous behaviour | Implementation | Why |
+|---|---|---|
+| `_7d` metric names "must not lie": rename **or** add `period` everywhere | **Renamed** to `m365_mail_sent`, `m365_mail_received`, `m365_mail_read`, each with a `period` label; thresholds renamed to `mail_sent_max`/`mail_received_max` (old `_7d` keys still accepted, exported under the new `check` names); rules and dashboard updated. Other report metrics (sizes, last activity) are point-in-time and carry no period | One consistent scheme; only traffic counts depend on the period |
+| OneDrive previously used the live `/drive` quota | Default `onedrive.source` is now `report` | Required by the spec (legacy apps lack `Files.Read.All`). Intentional behaviour change for existing configs; set `source: quota` (or `auto`) to keep the old data, including `m365_onedrive_deleted_bytes` |
+| Last activity "from the mailbox report when the mailbox collector has run" | The `users` collector reads the `mailbox` collector's cached snapshot for the same tenant (read-only `ctx.peer_samples`); the PromQL `or` alternative is documented above | Small, explicit coupling; no extra Graph call |
+| Concealment heuristic: "most values look like 32-character hex hashes" | No `@` in any UPN and **at least half** of them 32-hex | A report with two rows, one hashed, should count; rows without `@` are never exported anyway |
+| `m365_tenant_permission`: 1 per granted role | Also 0 for the roles m365c uses that are *not* granted | Makes "missing" visible in dashboards; only roles m365c knows about are exported |
+| `m365_collector_skipped{permission}` | Any-of alternatives joined with `|` (e.g. `Organization.Read.All|LicenseAssignment.Read.All`) | One series per unmet requirement group |
+| — | `Directory.Read.All` is not counted as satisfying any group | Not in the spec's parity set; Graph docs list it as a higher-privileged alternative for `subscribedSkus`, so a tenant granted only that role would see `license` skipped |
+| Default certificate optional when unused | Checked at startup and **fatal** if a tenant uses it or there are no tenants (as before); otherwise only a warning | Keeps the old fail-fast behaviour where it matters, lets client-secret-only deployments start with the Compose file's cert line still present |
+| `tenant verify` | Exit 1 also for a collector listed explicitly in `collectors:` that is skipped | It was asked for and cannot run; under `collectors: all` a skip is informational |
+| Client secret expiry alert `< 30 days` | Includes already expired secrets | Configured on purpose; unlike tenant app credentials, they must be renewed |
+| `m365c permissions` printed a flat list | Prints a table plus the parity set; `--all` gives the old flat list, `--parity` the four lines | Required vs optional per collector |
+| Per-tenant certificates | Supported (`auth.cert`), but only the default certificate exports `m365_cert_expiry_timestamp` | Kept the metric's meaning (Netwatch's own certificate); per-tenant certificate expiry is a follow-up |
+| `CertificateTokenProvider` (internal API) | Replaced by `TenantTokenProvider` | Per-tenant methods and secrets |
+| Optional `m365c zabbix parity-check` | **Not implemented** | Optional; see Branch status |
+
+Graph and Entra documentation checks (October 2026) and surprises:
+
+- `getOneDriveUsageAccountDetail` (v1.0) CSV now starts with a **`Site URL`** column after
+  *Report Refresh Date*; parsing is by header name, so order does not matter.
+- The v1.0 `getMailboxUsageDetail` page lists no `Recipient Type` column (the fixture, from
+  older output, has one; it is not used). The mailbox report's `period` does not change
+  sizes, only the activity window.
+- `subscribedSkus`: least privileged `LicenseAssignment.Read.All`; higher: `Organization.Read.All`,
+  `Directory.Read.All` (see the table above).
+- All three reports accept `D7`, `D30`, `D90`, `D180` and answer 302 to a pre-authenticated
+  download URL; the email-activity report covers 28 days for `date=` queries (not used).
+- The Entra token endpoint returns `error`, `error_description` and `error_codes`; the
+  description is free text and must not be used programmatically, so m365c maps on the
+  AADSTS code only. azure-identity logs the raw description at WARNING on failure, which is
+  why its logger is raised to ERROR.
+- `CertificateCredential` requires an **RSA** key (RS256); EC keys pass m365c's own check but
+  fail in azure-identity.
+
 ## Needs a real tenant
 
-Everything above is verified offline (unit tests, promtool/amtool, an end-to-end Compose run
-with fixture data). These need one consented test tenant before the first client:
+Everything above is verified offline (unit tests, real azure-identity credentials against a
+fake token endpoint, promtool/amtool, Compose validation). These need real tenants:
 
-1. `m365c tenant verify`: token, the 9 roles in the token, concealment, signInActivity.
-   Revoke consent and confirm `m365_tenant_auth_ok` drops to 0 within about 5 min (expect
-   `AADSTS…` in the error), then re-grant and confirm recovery.
-2. Certificate rotation with two certificates; an `AADSTS700027`-style error for the
-   removed one.
-3. signInActivity without P1: the exact 403 code, the fallback fires once, and
-   `m365_tenant_feature` = 0. Repeat with P1 but without `AuditLog.Read.All`.
-4. The agent-user filter: is the `isof` filter accepted on v1.0 (200 or 400)? Do agent users
-   carry `@odata.type`? Are they returned at all?
-5. Page size with signInActivity and throttling on large tenants.
-6. The report 302 flow, the download host, the BOM, and the exact CSV headers.
-7. The `/admin/reportSettings` response shape (flat or `value`-wrapped); toggle concealment.
-8. healthOverviews `status` casing.
-9. OneDrive app-only `GET /users/{id}/drive?$select=quota` with `Files.Read.All`: the
-   statuses for never-provisioned and Exchange-only users, and a full-run timing on the
-   largest tenant.
-10. secureScores order and date.
-11. appsecrets `endDateTime` population; include the Netwatch tenant so this app's own
-    certificate is monitored too.
-12. All collectors at once: `m365_graph_throttled_total` and `Retry-After` values.
+1. A migrated client (client secret): `m365c tenant verify` shows `client_secret`, the four
+   parity roles in the token, all five parity collectors running and the three others
+   skipped. Compare the numbers with the Zabbix items for a few days (checklist above).
+2. Entra error mapping with real responses: a wrong secret (`AADSTS7000215`), an expired one
+   (`AADSTS7000222`), a wrong client ID (`AADSTS700016`), a wrong tenant (`AADSTS90002`),
+   missing consent (`AADSTS65001`): reason label, alert text, and that nothing secret shows
+   up in logs.
+3. Secret rotation: replace a secret file; the next token uses it within about a minute and
+   the old credential is closed. Grant a new permission (e.g. `ServiceHealth.Read.All`) and
+   confirm the collector starts within an hour, with no restart.
+4. Certificate method (shared app): token, rotation with two certificates, an
+   `AADSTS700027`-style error for a removed certificate.
+5. signInActivity without P1: the exact 403 code, the fallback fires once,
+   `m365_tenant_feature` = 0, `m365_user_last_activity_timestamp` from the mailbox report.
+6. Reports: the 302 flow, BOM, exact CSV headers (including OneDrive's `Site URL`), the
+   concealment heuristic against a concealed tenant without `ReportSettings.Read.All`, and
+   the `/admin/reportSettings` shape where the permission is granted.
+7. OneDrive report vs quota numbers on the same tenant (allocated vs quota total; daily vs
+   live), and quota timing on the largest tenant.
+8. The agent-user filter on v1.0 (200 or 400?), and page size/throttling with
+   signInActivity on large tenants.
+9. healthOverviews `status` casing; secureScores order; appsecrets `endDateTime`.
+10. All collectors at once: `m365_graph_throttled_total` and `Retry-After` values.
+
+## Branch status
+
+Branch `feature/client-secret-template-parity` (from `main` at `74492f1`; not merged,
+not pushed). All commits are green: ruff, ruff format, mypy (strict), pytest (offline),
+promtool check/test, amtool, `docker compose config`.
+
+**Done**
+
+- Phase 1: parity matrix (`docs/parity.md`).
+- Phase 2: per-tenant auth (`client_secret`, `certificate`, pluggable methods), `env:`
+  backend, reference-only secrets with non-echoing validation, lazy per-tenant secrets,
+  credential cache keyed by secret fingerprint with file rotation, Entra error mapping,
+  `m365_tenant_auth_error`, `m365_client_secret_expiry_timestamp`, leak tests.
+- Phases 3 and 4 (one commit, the changes were coupled): permission gating with any-of
+  groups, skip/enable/permission metrics, `tenant verify` and `permissions`; user licences,
+  OneDrive report source, report period, concealment heuristic, mailbox info and deleted
+  count, zero-count mail traffic, new thresholds; the end-to-end acceptance test.
+- Phase 5: Grafana "Template parity" row, rules (`M365ClientSecretExpiring`, `reason` on
+  `M365TenantAuthFailed`, renamed metrics), promtool tests.
+- Phase 6: `tenant add --auth …` (references only), migration guide.
+- Phase 7: this README.
+
+**Left**
+
+- Optional `m365c zabbix parity-check` (Zabbix API + Prometheus diff per UPN): not started.
+  Sketch: read item values with `item.get`/`history.get` for the hosts created by the
+  discovery rules, map them with the checklist in "Migrating from the Zabbix templates",
+  query Prometheus `/api/v1/query` for the same UPNs, print differences; mark experimental.
+- Per-tenant certificate expiry metric (only the default certificate is exported).
+- Real-tenant validation (list above).
+
+**Resume**
+
+```sh
+git switch feature/client-secret-template-parity
+uv sync --all-extras
+uv run python -m pytest -q && uv run ruff check && uv run ruff format --check && uv run python -m mypy
+```
+
+Key files: `src/m365c/auth.py` (methods, `TenantTokenProvider`, error mapping),
+`src/m365c/config.py` (`TenantAuth`, `resolve_auth`, thresholds), `src/m365c/scheduler.py`
+(gating), `src/m365c/collectors/` (`required_permissions`/`optional_permissions`),
+`tests/test_parity_e2e.py` (acceptance), `tests/test_secret_leaks.py`.
