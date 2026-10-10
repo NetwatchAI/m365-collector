@@ -21,6 +21,7 @@ REQUIRED_ALERTS = {
     "M365HighMailTraffic", "M365ServiceDegraded", "M365AppCredentialExpiring",
     "M365CollectorFailing", "M365CollectorStale", "M365TenantAuthFailed", "M365ReportsConcealed",
     "M365CollectorDown", "M365PermissionMissing", "M365CertificateExpiring",
+    "M365ClientSecretExpiring",
 }  # fmt: skip
 
 
@@ -125,6 +126,26 @@ def test_dashboard_json_and_variables() -> None:
     for expected in ("Licence utilisation per SKU", "Top 10 mailboxes by % used", "Top 10 OneDrives by % used",
                      "Disabled users with licences", "Service health", "Secure score", "Collectors"):  # fmt: skip
         assert expected in titles
+
+
+def test_dashboard_has_template_parity_row() -> None:
+    """The four legacy Zabbix widgets, as tables filtered by the exported thresholds."""
+    dash = json.loads(
+        (DEPLOY / "grafana" / "dashboards" / "m365-overview.json").read_text(encoding="utf-8")
+    )
+    titles = [p["title"] for p in dash["panels"]]
+    assert "Template parity" in titles
+    parity = {
+        "Disabled users with licenses – ordered by last activity": "m365_user_last_activity_timestamp",
+        "Mailbox activity by size": 'check="mailbox_size_gb_min"',
+        "Emails sent/received – last N days (above thresholds)": 'check="mail_sent_max"',
+        "OneDrive activity by size (GB)": 'check="onedrive_size_gb_min"',
+    }
+    for title, needle in parity.items():
+        panel = next(p for p in dash["panels"] if p["title"] == title)
+        assert panel["type"] == "table"
+        exprs = " ".join(t["expr"] for t in panel["targets"])
+        assert needle in exprs and "$customer" in exprs and "$tenant" in exprs
 
 
 def test_compose_has_no_inline_secrets() -> None:

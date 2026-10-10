@@ -337,7 +337,7 @@
     },
     {
       "type": "row",
-      "title": "Licences",
+      "title": "Template parity",
       "id": 6,
       "collapsed": false,
       "gridPos": {
@@ -349,8 +349,8 @@
       "panels": []
     },
     {
-      "type": "bargauge",
-      "title": "Licence utilisation per SKU",
+      "type": "table",
+      "title": "Disabled users with licenses – ordered by last activity",
       "id": 7,
       "datasource": {
         "type": "prometheus",
@@ -361,6 +361,568 @@
         "w": 12,
         "x": 0,
         "y": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "m365_user_license{customer=~\"$customer\",tenant=~\"$tenant\"} * on(customer, tenant, upn) group_left(display_name, department) m365_user_info{customer=~\"$customer\",tenant=~\"$tenant\",enabled=\"false\",licensed=\"true\"}",
+          "refId": "A",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "m365_user_last_activity_timestamp{customer=~\"$customer\",tenant=~\"$tenant\"} * 1000 and on(customer, tenant, upn) m365_user_info{customer=~\"$customer\",tenant=~\"$tenant\",enabled=\"false\",licensed=\"true\"}",
+          "refId": "B",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "groupBy",
+          "options": {
+            "fields": {
+              "customer": {
+                "aggregations": [],
+                "operation": "groupby"
+              },
+              "tenant": {
+                "aggregations": [],
+                "operation": "groupby"
+              },
+              "upn": {
+                "aggregations": [],
+                "operation": "groupby"
+              },
+              "display_name": {
+                "aggregations": [],
+                "operation": "groupby"
+              },
+              "department": {
+                "aggregations": [],
+                "operation": "groupby"
+              },
+              "sku": {
+                "aggregations": [
+                  "uniqueValues"
+                ],
+                "operation": "aggregate"
+              },
+              "Value #B": {
+                "aggregations": [
+                  "max"
+                ],
+                "operation": "aggregate"
+              }
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true,
+              "Value #A": true
+            },
+            "renameByName": {
+              "upn": "UPN",
+              "display_name": "display name",
+              "sku (uniqueValues)": "licences",
+              "Value #B (max)": "last activity"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "last activity",
+                "desc": false
+              }
+            ]
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "last activity"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          }
+        ]
+      },
+      "description": "Last activity = last successful sign-in, or the mailbox report's last activity when sign-in data is unavailable (no AuditLog.Read.All / Entra ID P1)."
+    },
+    {
+      "type": "table",
+      "title": "Mailbox activity by size",
+      "id": 8,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "m365_mailbox_used_bytes{customer=~\"$customer\",tenant=~\"$tenant\"} >= on(customer, tenant) group_left() (m365_threshold{customer=~\"$customer\",tenant=~\"$tenant\",check=\"mailbox_size_gb_min\"} * 1073741824)",
+          "refId": "A",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "m365_mailbox_last_activity_timestamp{customer=~\"$customer\",tenant=~\"$tenant\"} * 1000 and on(customer, tenant, upn) (m365_mailbox_used_bytes{customer=~\"$customer\",tenant=~\"$tenant\"} >= on(customer, tenant) group_left() (m365_threshold{customer=~\"$customer\",tenant=~\"$tenant\",check=\"mailbox_size_gb_min\"} * 1073741824))",
+          "refId": "B",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "m365_mailbox_info{customer=~\"$customer\",tenant=~\"$tenant\"} and on(customer, tenant, upn) (m365_mailbox_used_bytes{customer=~\"$customer\",tenant=~\"$tenant\"} >= on(customer, tenant) group_left() (m365_threshold{customer=~\"$customer\",tenant=~\"$tenant\",check=\"mailbox_size_gb_min\"} * 1073741824))",
+          "refId": "C",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true,
+              "Value #C": true
+            },
+            "renameByName": {
+              "Value #A": "used",
+              "Value #B": "last activity",
+              "upn": "UPN",
+              "display_name": "display name",
+              "has_archive": "archive"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "used",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "used"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "last activity"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          }
+        ]
+      },
+      "description": "Mailboxes at or above mailbox_size_gb_min (thresholds.yaml)."
+    },
+    {
+      "type": "table",
+      "title": "Emails sent/received – last N days (above thresholds)",
+      "id": 9,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "m365_mail_sent{customer=~\"$customer\",tenant=~\"$tenant\"} and on(customer, tenant, upn, period) ((m365_mail_sent{customer=~\"$customer\",tenant=~\"$tenant\"} > on(customer, tenant) group_left() m365_threshold{customer=~\"$customer\",tenant=~\"$tenant\",check=\"mail_sent_max\"}) or on(customer, tenant, upn, period) (m365_mail_received{customer=~\"$customer\",tenant=~\"$tenant\"} > on(customer, tenant) group_left() m365_threshold{customer=~\"$customer\",tenant=~\"$tenant\",check=\"mail_received_max\"}))",
+          "refId": "A",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "m365_mail_received{customer=~\"$customer\",tenant=~\"$tenant\"} and on(customer, tenant, upn, period) ((m365_mail_sent{customer=~\"$customer\",tenant=~\"$tenant\"} > on(customer, tenant) group_left() m365_threshold{customer=~\"$customer\",tenant=~\"$tenant\",check=\"mail_sent_max\"}) or on(customer, tenant, upn, period) (m365_mail_received{customer=~\"$customer\",tenant=~\"$tenant\"} > on(customer, tenant) group_left() m365_threshold{customer=~\"$customer\",tenant=~\"$tenant\",check=\"mail_received_max\"}))",
+          "refId": "B",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true
+            },
+            "renameByName": {
+              "Value #A": "sent",
+              "Value #B": "received",
+              "upn": "UPN",
+              "period": "report period"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "sent",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "description": "Users above mail_sent_max or mail_received_max over the report period (reports.period: D7, D30, D90 or D180)."
+    },
+    {
+      "type": "table",
+      "title": "OneDrive activity by size (GB)",
+      "id": 10,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "m365_onedrive_used_bytes{customer=~\"$customer\",tenant=~\"$tenant\"} >= on(customer, tenant) group_left() (m365_threshold{customer=~\"$customer\",tenant=~\"$tenant\",check=\"onedrive_size_gb_min\"} * 1073741824)",
+          "refId": "A",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "m365_onedrive_total_bytes{customer=~\"$customer\",tenant=~\"$tenant\"} and on(customer, tenant, upn) (m365_onedrive_used_bytes{customer=~\"$customer\",tenant=~\"$tenant\"} >= on(customer, tenant) group_left() (m365_threshold{customer=~\"$customer\",tenant=~\"$tenant\",check=\"onedrive_size_gb_min\"} * 1073741824))",
+          "refId": "B",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "m365_onedrive_used_bytes{customer=~\"$customer\",tenant=~\"$tenant\"} / (m365_onedrive_total_bytes{customer=~\"$customer\",tenant=~\"$tenant\"} > 0) and on(customer, tenant, upn) (m365_onedrive_used_bytes{customer=~\"$customer\",tenant=~\"$tenant\"} >= on(customer, tenant) group_left() (m365_threshold{customer=~\"$customer\",tenant=~\"$tenant\",check=\"onedrive_size_gb_min\"} * 1073741824))",
+          "refId": "C",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "m365_onedrive_file_count{customer=~\"$customer\",tenant=~\"$tenant\"} and on(customer, tenant, upn) (m365_onedrive_used_bytes{customer=~\"$customer\",tenant=~\"$tenant\"} >= on(customer, tenant) group_left() (m365_threshold{customer=~\"$customer\",tenant=~\"$tenant\",check=\"onedrive_size_gb_min\"} * 1073741824))",
+          "refId": "D",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "m365_onedrive_last_activity_timestamp{customer=~\"$customer\",tenant=~\"$tenant\"} * 1000 and on(customer, tenant, upn) (m365_onedrive_used_bytes{customer=~\"$customer\",tenant=~\"$tenant\"} >= on(customer, tenant) group_left() (m365_threshold{customer=~\"$customer\",tenant=~\"$tenant\",check=\"onedrive_size_gb_min\"} * 1073741824))",
+          "refId": "E",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "m365_onedrive_info{customer=~\"$customer\",tenant=~\"$tenant\"} and on(customer, tenant, upn) (m365_onedrive_used_bytes{customer=~\"$customer\",tenant=~\"$tenant\"} >= on(customer, tenant) group_left() (m365_threshold{customer=~\"$customer\",tenant=~\"$tenant\",check=\"onedrive_size_gb_min\"} * 1073741824))",
+          "refId": "F",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true,
+              "Value #F": true
+            },
+            "renameByName": {
+              "Value #A": "used",
+              "Value #B": "allocated",
+              "Value #C": "% used",
+              "Value #D": "files",
+              "Value #E": "last activity",
+              "upn": "UPN",
+              "display_name": "display name"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "used",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "used"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "allocated"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "% used"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "last activity"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          }
+        ]
+      },
+      "description": "OneDrives at or above onedrive_size_gb_min. File count and last activity come from the usage report (onedrive.source: report, the default)."
+    },
+    {
+      "type": "row",
+      "title": "Licences",
+      "id": 11,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "panels": []
+    },
+    {
+      "type": "bargauge",
+      "title": "Licence utilisation per SKU",
+      "id": 12,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 27
       },
       "targets": [
         {
@@ -417,7 +979,7 @@
     {
       "type": "table",
       "title": "Licences",
-      "id": 8,
+      "id": 13,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -426,7 +988,7 @@
         "h": 10,
         "w": 12,
         "x": 12,
-        "y": 6
+        "y": 27
       },
       "targets": [
         {
@@ -516,20 +1078,20 @@
     {
       "type": "row",
       "title": "Storage",
-      "id": 9,
+      "id": 14,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 16
+        "y": 37
       },
       "panels": []
     },
     {
       "type": "bargauge",
       "title": "Top 10 mailboxes by % used",
-      "id": 10,
+      "id": 15,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -538,7 +1100,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 17
+        "y": 38
       },
       "targets": [
         {
@@ -595,7 +1157,7 @@
     {
       "type": "bargauge",
       "title": "Top 10 OneDrives by % used",
-      "id": 11,
+      "id": 16,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -604,7 +1166,7 @@
         "h": 10,
         "w": 12,
         "x": 12,
-        "y": 17
+        "y": 38
       },
       "targets": [
         {
@@ -661,20 +1223,20 @@
     {
       "type": "row",
       "title": "Users",
-      "id": 12,
+      "id": 17,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 27
+        "y": 48
       },
       "panels": []
     },
     {
       "type": "table",
       "title": "Disabled users with licences",
-      "id": 13,
+      "id": 18,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -683,7 +1245,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 28
+        "y": 49
       },
       "targets": [
         {
@@ -732,7 +1294,7 @@
     {
       "type": "table",
       "title": "Inactive licensed users (days since last sign-in)",
-      "id": 14,
+      "id": 19,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -741,7 +1303,7 @@
         "h": 10,
         "w": 12,
         "x": 12,
-        "y": 28
+        "y": 49
       },
       "targets": [
         {
@@ -801,7 +1363,7 @@
     {
       "type": "table",
       "title": "Licensed users who never signed in (days since account creation)",
-      "id": 15,
+      "id": 20,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -810,7 +1372,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 38
+        "y": 59
       },
       "targets": [
         {
@@ -870,20 +1432,20 @@
     {
       "type": "row",
       "title": "Mail",
-      "id": 16,
+      "id": 21,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 46
+        "y": 67
       },
       "panels": []
     },
     {
       "type": "bargauge",
-      "title": "Top 10 senders (7d)",
-      "id": 17,
+      "title": "Top 10 senders (report period)",
+      "id": 22,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -892,7 +1454,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 47
+        "y": 68
       },
       "targets": [
         {
@@ -939,8 +1501,8 @@
     },
     {
       "type": "bargauge",
-      "title": "Top 10 receivers (7d)",
-      "id": 18,
+      "title": "Top 10 receivers (report period)",
+      "id": 23,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -949,7 +1511,7 @@
         "h": 10,
         "w": 12,
         "x": 12,
-        "y": 47
+        "y": 68
       },
       "targets": [
         {
@@ -997,20 +1559,20 @@
     {
       "type": "row",
       "title": "Tenant health",
-      "id": 19,
+      "id": 24,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 57
+        "y": 78
       },
       "panels": []
     },
     {
       "type": "table",
       "title": "Service health",
-      "id": 20,
+      "id": 25,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1019,7 +1581,7 @@
         "h": 10,
         "w": 8,
         "x": 0,
-        "y": 58
+        "y": 79
       },
       "targets": [
         {
@@ -1105,7 +1667,7 @@
     {
       "type": "timeseries",
       "title": "Secure score",
-      "id": 21,
+      "id": 26,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1114,7 +1676,7 @@
         "h": 10,
         "w": 8,
         "x": 8,
-        "y": 58
+        "y": 79
       },
       "targets": [
         {
@@ -1152,7 +1714,7 @@
     {
       "type": "table",
       "title": "App credentials expiring within 60 days (negative = expired)",
-      "id": 22,
+      "id": 27,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1161,7 +1723,7 @@
         "h": 10,
         "w": 8,
         "x": 16,
-        "y": 58
+        "y": 79
       },
       "targets": [
         {
@@ -1221,20 +1783,20 @@
     {
       "type": "row",
       "title": "Collector health",
-      "id": 23,
+      "id": 28,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 68
+        "y": 89
       },
       "panels": []
     },
     {
       "type": "table",
       "title": "Collectors",
-      "id": 24,
+      "id": 29,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1243,7 +1805,7 @@
         "h": 10,
         "w": 14,
         "x": 0,
-        "y": 69
+        "y": 90
       },
       "targets": [
         {
@@ -1437,7 +1999,7 @@
     {
       "type": "timeseries",
       "title": "Graph requests / throttling",
-      "id": 25,
+      "id": 30,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1446,7 +2008,7 @@
         "h": 10,
         "w": 10,
         "x": 14,
-        "y": 69
+        "y": 90
       },
       "targets": [
         {
@@ -1482,9 +2044,69 @@
       }
     },
     {
+      "type": "table",
+      "title": "Collectors skipped for a missing Graph permission",
+      "id": 31,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 100
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "m365_collector_skipped{customer=~\"$customer\",tenant=~\"$tenant\"} == 1",
+          "refId": "A",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true,
+              "Value": true
+            },
+            "renameByName": {
+              "permission": "missing (any of, separated by |)"
+            }
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "description": "Grant the permission in the client's app registration (admin consent), then: m365c tenant verify <customer>. Skipped collectors raise no alerts."
+    },
+    {
       "type": "logs",
       "title": "Collector logs (warnings and errors)",
-      "id": 26,
+      "id": 32,
       "datasource": {
         "type": "loki",
         "uid": "loki"
@@ -1493,7 +2115,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 79
+        "y": 106
       },
       "targets": [
         {

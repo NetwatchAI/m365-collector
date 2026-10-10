@@ -60,8 +60,22 @@ def stat(title, expr, x, y, w=6, h=4, unit="short", thresholds=None, legend=""):
     )
 
 
-def table(title, targets, x, y, w, h, organize=None, unit=None, sort=None, overrides=None):
+def table(
+    title,
+    targets,
+    x,
+    y,
+    w,
+    h,
+    organize=None,
+    unit=None,
+    sort=None,
+    overrides=None,
+    extra=None,
+    description=None,
+):
     transformations = [{"id": "merge", "options": {}}] if len(targets) > 1 else []
+    transformations += extra or []
     if organize:
         transformations.append({"id": "organize", "options": organize})
     if sort:
@@ -69,19 +83,20 @@ def table(title, targets, x, y, w, h, organize=None, unit=None, sort=None, overr
     defaults = {"custom": {"align": "auto", "filterable": True}}
     if unit:
         defaults["unit"] = unit
-    panels.append(
-        {
-            "type": "table",
-            "title": title,
-            "id": nid(),
-            "datasource": DS,
-            "gridPos": {"h": h, "w": w, "x": x, "y": y},
-            "targets": targets,
-            "transformations": transformations,
-            "options": {"showHeader": True, "cellHeight": "sm"},
-            "fieldConfig": {"defaults": defaults, "overrides": overrides or []},
-        }
-    )
+    panel = {
+        "type": "table",
+        "title": title,
+        "id": nid(),
+        "datasource": DS,
+        "gridPos": {"h": h, "w": w, "x": x, "y": y},
+        "targets": targets,
+        "transformations": transformations,
+        "options": {"showHeader": True, "cellHeight": "sm"},
+        "fieldConfig": {"defaults": defaults, "overrides": overrides or []},
+    }
+    if description:
+        panel["description"] = description
+    panels.append(panel)
 
 
 PCT_STEPS = {
@@ -173,6 +188,221 @@ stat(
     },
 )
 y += 4
+
+# ---------------------------------------------------------------- template parity
+# The four widgets of the legacy Zabbix dashboards. Thresholds come from m365_threshold
+# (thresholds.yaml), so no data is filtered at collection time.
+GIB = 1073741824
+
+
+def unit_override(name, unit):
+    return {
+        "matcher": {"id": "byName", "options": name},
+        "properties": [{"id": "unit", "value": unit}],
+    }
+
+
+row("Template parity", y)
+y += 1
+table(
+    "Disabled users with licenses – ordered by last activity",
+    [
+        target(
+            f"m365_user_license{{{SEL}}} * on(customer, tenant, upn) group_left(display_name, department)"
+            f' m365_user_info{{{SEL},enabled="false",licensed="true"}}',
+            instant=True,
+            fmt="table",
+            ref="A",
+        ),
+        target(
+            f"m365_user_last_activity_timestamp{{{SEL}}} * 1000"
+            f' and on(customer, tenant, upn) m365_user_info{{{SEL},enabled="false",licensed="true"}}',
+            instant=True,
+            fmt="table",
+            ref="B",
+        ),
+    ],
+    0,
+    y,
+    12,
+    10,
+    extra=[
+        {
+            "id": "groupBy",
+            "options": {
+                "fields": {
+                    "customer": {"aggregations": [], "operation": "groupby"},
+                    "tenant": {"aggregations": [], "operation": "groupby"},
+                    "upn": {"aggregations": [], "operation": "groupby"},
+                    "display_name": {"aggregations": [], "operation": "groupby"},
+                    "department": {"aggregations": [], "operation": "groupby"},
+                    "sku": {"aggregations": ["uniqueValues"], "operation": "aggregate"},
+                    "Value #B": {"aggregations": ["max"], "operation": "aggregate"},
+                }
+            },
+        }
+    ],
+    organize={
+        **hide("Value #A"),
+        "renameByName": {
+            "upn": "UPN",
+            "display_name": "display name",
+            "sku (uniqueValues)": "licences",
+            "Value #B (max)": "last activity",
+        },
+    },
+    sort={"field": "last activity", "desc": False},
+    overrides=[unit_override("last activity", "dateTimeAsIso")],
+    description="Last activity = last successful sign-in, or the mailbox report's last activity "
+    "when sign-in data is unavailable (no AuditLog.Read.All / Entra ID P1).",
+)
+MAILBOX_BIG = (
+    f"m365_mailbox_used_bytes{{{SEL}}} >= on(customer, tenant) group_left()"
+    f' (m365_threshold{{{SEL},check="mailbox_size_gb_min"}} * {GIB})'
+)
+table(
+    "Mailbox activity by size",
+    [
+        target(MAILBOX_BIG, instant=True, fmt="table", ref="A"),
+        target(
+            f"m365_mailbox_last_activity_timestamp{{{SEL}}} * 1000 and on(customer, tenant, upn) ({MAILBOX_BIG})",
+            instant=True,
+            fmt="table",
+            ref="B",
+        ),
+        target(
+            f"m365_mailbox_info{{{SEL}}} and on(customer, tenant, upn) ({MAILBOX_BIG})",
+            instant=True,
+            fmt="table",
+            ref="C",
+        ),
+    ],
+    12,
+    y,
+    12,
+    10,
+    organize={
+        **hide("Value #C"),
+        "renameByName": {
+            "Value #A": "used",
+            "Value #B": "last activity",
+            "upn": "UPN",
+            "display_name": "display name",
+            "has_archive": "archive",
+        },
+    },
+    sort={"field": "used", "desc": True},
+    overrides=[unit_override("used", "bytes"), unit_override("last activity", "dateTimeAsIso")],
+    description="Mailboxes at or above mailbox_size_gb_min (thresholds.yaml).",
+)
+y += 10
+MAIL_HIGH = (
+    f"(m365_mail_sent{{{SEL}}} > on(customer, tenant) group_left()"
+    f' m365_threshold{{{SEL},check="mail_sent_max"}})'
+    f" or on(customer, tenant, upn, period)"
+    f" (m365_mail_received{{{SEL}}} > on(customer, tenant) group_left()"
+    f' m365_threshold{{{SEL},check="mail_received_max"}})'
+)
+table(
+    "Emails sent/received – last N days (above thresholds)",
+    [
+        target(
+            f"m365_mail_sent{{{SEL}}} and on(customer, tenant, upn, period) ({MAIL_HIGH})",
+            instant=True,
+            fmt="table",
+            ref="A",
+        ),
+        target(
+            f"m365_mail_received{{{SEL}}} and on(customer, tenant, upn, period) ({MAIL_HIGH})",
+            instant=True,
+            fmt="table",
+            ref="B",
+        ),
+    ],
+    0,
+    y,
+    12,
+    10,
+    organize={
+        **hide(),
+        "renameByName": {
+            "Value #A": "sent",
+            "Value #B": "received",
+            "upn": "UPN",
+            "period": "report period",
+        },
+    },
+    sort={"field": "sent", "desc": True},
+    description="Users above mail_sent_max or mail_received_max over the report period "
+    "(reports.period: D7, D30, D90 or D180).",
+)
+ONEDRIVE_BIG = (
+    f"m365_onedrive_used_bytes{{{SEL}}} >= on(customer, tenant) group_left()"
+    f' (m365_threshold{{{SEL},check="onedrive_size_gb_min"}} * {GIB})'
+)
+table(
+    "OneDrive activity by size (GB)",
+    [
+        target(ONEDRIVE_BIG, instant=True, fmt="table", ref="A"),
+        target(
+            f"m365_onedrive_total_bytes{{{SEL}}} and on(customer, tenant, upn) ({ONEDRIVE_BIG})",
+            instant=True,
+            fmt="table",
+            ref="B",
+        ),
+        target(
+            f"m365_onedrive_used_bytes{{{SEL}}} / (m365_onedrive_total_bytes{{{SEL}}} > 0)"
+            f" and on(customer, tenant, upn) ({ONEDRIVE_BIG})",
+            instant=True,
+            fmt="table",
+            ref="C",
+        ),
+        target(
+            f"m365_onedrive_file_count{{{SEL}}} and on(customer, tenant, upn) ({ONEDRIVE_BIG})",
+            instant=True,
+            fmt="table",
+            ref="D",
+        ),
+        target(
+            f"m365_onedrive_last_activity_timestamp{{{SEL}}} * 1000 and on(customer, tenant, upn) ({ONEDRIVE_BIG})",
+            instant=True,
+            fmt="table",
+            ref="E",
+        ),
+        target(
+            f"m365_onedrive_info{{{SEL}}} and on(customer, tenant, upn) ({ONEDRIVE_BIG})",
+            instant=True,
+            fmt="table",
+            ref="F",
+        ),
+    ],
+    12,
+    y,
+    12,
+    10,
+    organize={
+        **hide("Value #F"),
+        "renameByName": {
+            "Value #A": "used",
+            "Value #B": "allocated",
+            "Value #C": "% used",
+            "Value #D": "files",
+            "Value #E": "last activity",
+            "upn": "UPN",
+            "display_name": "display name",
+        },
+    },
+    sort={"field": "used", "desc": True},
+    overrides=[
+        unit_override("used", "bytes"),
+        unit_override("allocated", "bytes"),
+        unit_override("% used", "percentunit"),
+        unit_override("last activity", "dateTimeAsIso"),
+    ],
+    description="OneDrives at or above onedrive_size_gb_min. File count and last activity come "
+    "from the usage report (onedrive.source: report, the default).",
+)
+y += 10
 
 row("Licences", y)
 y += 1
@@ -280,7 +510,7 @@ y += 8
 row("Mail", y)
 y += 1
 bargauge(
-    "Top 10 senders (7d)",
+    "Top 10 senders (report period)",
     f"topk(10, m365_mail_sent{{{SEL}}})",
     "{{upn}}",
     0,
@@ -292,7 +522,7 @@ bargauge(
     thresholds=BLUE,
 )
 bargauge(
-    "Top 10 receivers (7d)",
+    "Top 10 receivers (report period)",
     f"topk(10, m365_mail_received{{{SEL}}})",
     "{{upn}}",
     12,
@@ -467,6 +697,18 @@ panels.append(
     }
 )
 y += 10
+table(
+    "Collectors skipped for a missing Graph permission",
+    [target(f"m365_collector_skipped{{{SEL}}} == 1", instant=True, fmt="table")],
+    0,
+    y,
+    24,
+    6,
+    organize={**hide("Value"), "renameByName": {"permission": "missing (any of, separated by |)"}},
+    description="Grant the permission in the client's app registration (admin consent), then: "
+    "m365c tenant verify <customer>. Skipped collectors raise no alerts.",
+)
+y += 6
 LOKI = {"type": "loki", "uid": "loki"}
 panels.append(
     {

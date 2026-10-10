@@ -1,6 +1,16 @@
 # Alert rules for m365c. Thresholds come from the collector as
 # m365_threshold{customer,tenant,check} and are joined with on(customer, tenant).
 # Every alert carries `customer` and `tenant`.
+#
+# Collectors skipped for a missing Graph permission (m365_collector_enabled 0) export no
+# data and no success/last-success series, so the rules that read their metrics simply stay
+# quiet instead of firing CollectorFailing/CollectorStale. For the legacy client apps (the
+# four template-parity permissions) that means:
+#   - M365ServiceDegraded       quiet (servicehealth needs ServiceHealth.Read.All)
+#   - M365AppCredentialExpiring quiet (appsecrets needs Application.Read.All); use
+#                               M365ClientSecretExpiring (auth.client_secret_expires) instead
+#   - M365UserInactive          quiet without AuditLog.Read.All + Entra ID P1 (signInActivity)
+#   - secure score panels empty (securescore needs SecurityEvents.Read.All)
 groups:
   - name: m365-licenses
     rules:
@@ -114,7 +124,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "{{ $labels.customer }}: {{ $labels.upn }} {{ $labels.direction }} {{ $value }} mails in 7 days"
+          summary: "{{ $labels.customer }}: {{ $labels.upn }} {{ $labels.direction }} {{ $value }} mails in report period {{ $labels.period }}"
           description: "Mail volume for {{ $labels.upn }} in tenant {{ $labels.tenant }} is above the {{ $labels.direction }} threshold (possible compromise or bulk sending)."
 
       - alert: M365ReportsConcealed
@@ -150,13 +160,37 @@ groups:
           description: "App {{ $labels.app }} ({{ $labels.app_id }}) credential {{ $labels.key_id }} in tenant {{ $labels.tenant }} expires within 30 days."
 
       - alert: M365TenantAuthFailed
-        expr: m365_tenant_auth_ok == 0
+        # `reason` comes from m365_tenant_auth_error (AADSTS mapping, secret_unavailable,
+        # unauthorized); the `or` keeps the alert if that series is missing.
+        expr: |
+          (m365_tenant_auth_ok == 0)
+            * on(customer, tenant) group_left(reason) (m365_tenant_auth_error == 1)
+          or on(customer, tenant)
+          (m365_tenant_auth_ok == 0)
         for: 15m
         labels:
           severity: critical
         annotations:
-          summary: "{{ $labels.customer }}: cannot authenticate to tenant {{ $labels.tenant }}"
-          description: "Token request or Graph 401/403. Consent may be revoked or a permission missing. Run: m365c tenant verify {{ $labels.customer }}"
+          summary: "{{ $labels.customer }}: cannot authenticate to tenant {{ $labels.tenant }}{{ with $labels.reason }} ({{ . }}){{ end }}"
+          description: >-
+            {{ if eq $labels.reason "secret_expired" }}The client secret has expired (AADSTS7000222): create a new one in the client's app registration, replace the secret file and update auth.client_secret_expires.
+            {{ else if eq $labels.reason "invalid_client_secret" }}The client secret is wrong (AADSTS7000215): check the secret file or reference for this tenant.
+            {{ else if eq $labels.reason "secret_unavailable" }}The tenant's secret reference cannot be read (missing file, unset variable, vault error); see the collector log.
+            {{ else }}Token request or Graph 401. Consent may be revoked or the app removed.
+            {{ end }}Run: m365c tenant verify {{ $labels.customer }}
+
+      - alert: M365ClientSecretExpiring
+        # From auth.client_secret_expires in tenants.yaml (an app cannot read its own
+        # secret's expiry without Application.Read.All). Includes already expired secrets:
+        # they are configured on purpose, so they should be renewed, not ignored.
+        expr: (m365_client_secret_expiry_timestamp - time()) < 30 * 86400
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.customer }}: client secret of app {{ $labels.client_id }} for {{ $labels.tenant }} expires in {{ $value | humanizeDuration }}"
+          description: "Create a new client secret in the client tenant's app registration, write it to the tenant's secret file (picked up without a restart), then update auth.client_secret_expires. After expiry, M365TenantAuthFailed fires with reason=\"secret_expired\"."
+
 
       - alert: M365PermissionMissing
         expr: m365_collector_permission_ok == 0

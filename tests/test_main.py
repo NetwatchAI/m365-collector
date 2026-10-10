@@ -180,3 +180,48 @@ async def test_serve_starts_with_expired_certificate_and_exports_expiry(tmp_path
     assert expiry is not None and expiry < time.time()  # so M365CertificateExpiring fires
     stop.set()
     await asyncio.wait_for(task, timeout=10)
+
+
+async def test_serve_client_secret_tenants_ignore_unusable_default_certificate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only client-secret tenants: a missing default certificate (as the Compose file still
+    configures one) does not stop the service, and the tenant collects with its own secret."""
+    from m365c import main as main_module
+    from m365c.auth import TenantTokenProvider
+
+    from .identity import FAKE_SECRET, FakeIdentity
+
+    monkeypatch.setattr("m365c.scheduler.MAX_INITIAL_JITTER_S", 0.0)
+    identity = FakeIdentity()
+    monkeypatch.setattr(
+        main_module,
+        "TenantTokenProvider",
+        lambda: TenantTokenProvider(credential_kwargs={"transport": identity}),
+    )
+    secret = tmp_path / "contoso_client_secret"
+    secret.write_text(FAKE_SECRET, encoding="utf-8")
+    cfg = tmp_path / "config"
+    write_config(cfg, free_port(), tmp_path / "cache", tmp_path / "missing-cert.pem")
+    (cfg / "tenants.yaml").write_text(
+        f"tenants:\n  - id: {TENANT_ID}\n    name: contoso.onmicrosoft.com\n"
+        "    customer: contoso\n    collectors: [license]\n"
+        "    auth:\n      method: client_secret\n"
+        f"      client_id: 33333333-3333-3333-3333-333333333333\n"
+        f"      client_secret: file:{secret.as_posix()}\n",
+        encoding="utf-8",
+    )
+    stop = asyncio.Event()
+    registry = CollectorRegistry()
+    task = asyncio.create_task(
+        serve(cfg, transport=fixture_transport(GRAPH_FIXTURES), registry=registry, stop=stop)
+    )
+    labels = {"customer": "contoso", "tenant": "contoso.onmicrosoft.com", "collector": "license"}
+    for _ in range(200):
+        if registry.get_sample_value("m365_collector_success", labels) is not None:
+            break
+        await asyncio.sleep(0.02)
+    assert registry.get_sample_value("m365_collector_success", labels) == 1.0
+    assert identity.secrets_seen == [FAKE_SECRET]
+    stop.set()
+    await asyncio.wait_for(task, timeout=10)

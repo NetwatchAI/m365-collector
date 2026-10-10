@@ -13,11 +13,18 @@ services:
     restart: unless-stopped
     environment:
       M365C_CONFIG_DIR: /etc/m365c
+      # Default certificate (multi-tenant app). Only needed if a tenant uses certificate
+      # auth without its own auth.cert; with client-secret tenants only, remove this line
+      # and the m365c_cert secret below.
       M365C_SECRETS__CERT: file:/run/secrets/m365c_cert
       M365C_CACHE__PERSIST_DIR: /var/lib/m365c/cache
     volumes:
       - ../config:/etc/m365c:ro
       - m365c-cache:/var/lib/m365c
+      # Per-tenant client secrets, one file per tenant, referenced from tenants.yaml as
+      # client_secret: file:/run/m365c-secrets/<customer>_client_secret
+      # (files owned by uid 10001, mode 0400; see README "Migrating from the Zabbix templates").
+      - ./secrets/tenants:/run/m365c-secrets:ro
     secrets:
       - source: m365c_cert
         target: m365c_cert

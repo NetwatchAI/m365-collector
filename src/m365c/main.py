@@ -15,6 +15,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_l
 
 from m365c import __version__
 from m365c.auth import (
+    CertificateError,
     CertificateInfo,
     TenantTokenProvider,
     TokenProvider,
@@ -33,6 +34,7 @@ from m365c.exporter import register
 from m365c.graph import GraphClient
 from m365c.health import REGISTRY
 from m365c.scheduler import Scheduler
+from m365c.secrets import SecretError
 from m365c.state import AppState
 
 log = structlog.get_logger(__name__)
@@ -119,16 +121,30 @@ async def serve(
     state = AppState(collectors=collectors, cache=SnapshotCache(settings.cache.persist_dir))
     state.thresholds = cfg.thresholds
     if tokens is None:
-        if settings.secrets.cert is not None and (
-            settings.app.method == "certificate" or uses_default_certificate(settings, cfg.tenants)
-        ):
-            # The shared default certificate is checked now, as before: a broken one must
-            # fail startup, not every tenant's token request later. Raises CertificateError /
-            # SecretError. Per-tenant secrets (client secrets, own certificates) load lazily,
-            # so one tenant's broken reference cannot stop the others.
-            _, _, info = load_app_certificate(settings.secrets.cert, settings.secrets.cert_password)
-            _log_certificate(info)
-            state.certificate = info
+        if settings.secrets.cert is not None:
+            # The shared default certificate is checked now, as before: if a tenant uses it
+            # (or there are no tenants yet), a broken one must fail startup, not every token
+            # request later. If only per-tenant auth is in use it is optional: a problem is
+            # logged, not fatal. Per-tenant secrets (client secrets, own certificates) load
+            # lazily, so one tenant's broken reference cannot stop the others.
+            required = uses_default_certificate(settings, cfg.tenants) or not any(
+                t.enabled for t in cfg.tenants
+            )
+            try:
+                _, _, info = load_app_certificate(
+                    settings.secrets.cert, settings.secrets.cert_password
+                )
+            except (SecretError, CertificateError) as exc:
+                if required:
+                    raise
+                log.warning(
+                    "default_certificate_unavailable",
+                    error=str(exc),
+                    hint="no tenant uses the default certificate; remove secrets.cert to silence",
+                )
+            else:
+                _log_certificate(info)
+                state.certificate = info
         tokens = TenantTokenProvider()
 
     async with contextlib.AsyncExitStack() as stack:

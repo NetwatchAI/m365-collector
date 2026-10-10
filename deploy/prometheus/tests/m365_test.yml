@@ -152,10 +152,15 @@ tests:
         values: '800x120'
       - series: 'm365_threshold{customer="c",tenant="t",check="mail_received_max"}'
         values: '800x120'
-      - series: 'm365_mail_sent{customer="c",tenant="t",upn="spam@x"}'
+      - series: 'm365_mail_sent{customer="c",tenant="t",upn="spam@x",period="D30"}'
         values: '900x120'
-      - series: 'm365_mail_received{customer="c",tenant="t",upn="spam@x"}'
+      - series: 'm365_mail_received{customer="c",tenant="t",upn="spam@x",period="D30"}'
         values: '10x120'
+      # a quiet mailbox (zero counts are exported too): silent
+      - series: 'm365_mail_sent{customer="c",tenant="t",upn="quiet@x",period="D30"}'
+        values: '0x120'
+      - series: 'm365_mail_received{customer="c",tenant="t",upn="quiet@x",period="D30"}'
+        values: '0x120'
       - series: 'm365_reports_concealed{customer="c",tenant="t",report="mailbox"}'
         values: '1x120'
       - series: 'm365_reports_concealed{customer="c",tenant="t",report="mailtraffic"}'
@@ -164,9 +169,9 @@ tests:
       - eval_time: 90m
         alertname: M365HighMailTraffic
         exp_alerts:
-          - exp_labels: {severity: warning, customer: c, tenant: t, upn: spam@x, direction: sent}
+          - exp_labels: {severity: warning, customer: c, tenant: t, upn: spam@x, direction: sent, period: D30}
             exp_annotations:
-              summary: "c: spam@x sent 900 mails in 7 days"
+              summary: "c: spam@x sent 900 mails in report period D30"
               description: "Mail volume for spam@x in tenant t is above the sent threshold (possible compromise or bulk sending)."
       - eval_time: 90m
         alertname: M365ReportsConcealed
@@ -197,6 +202,18 @@ tests:
         values: '5191200x120'
       - series: 'm365_tenant_auth_ok{customer="c",tenant="t"}'
         values: '0x120'
+      - series: 'm365_tenant_auth_error{customer="c",tenant="t",reason="secret_expired"}'
+        values: '1x120'
+      # no reason series (older exporter): still alerts, without a reason
+      - series: 'm365_tenant_auth_ok{customer="c",tenant="t2"}'
+        values: '0x120'
+      - series: 'm365_tenant_auth_ok{customer="c",tenant="ok"}'
+        values: '1x120'
+      # client secrets: expires in 10 days -> fires; in 60 days -> silent
+      - series: 'm365_client_secret_expiry_timestamp{customer="c",tenant="t",client_id="cid1"}'
+        values: '871200x120'
+      - series: 'm365_client_secret_expiry_timestamp{customer="c",tenant="ok",client_id="cid2"}'
+        values: '5191200x120'
       - series: 'm365_collector_permission_ok{customer="c",tenant="t",collector="securescore"}'
         values: '0x120'
       - series: 'm365_cert_expiry_timestamp{thumbprint="AB12"}'
@@ -223,10 +240,22 @@ tests:
       - eval_time: 2h
         alertname: M365TenantAuthFailed
         exp_alerts:
-          - exp_labels: {severity: critical, customer: c, tenant: t}
+          - exp_labels: {severity: critical, customer: c, tenant: t, reason: secret_expired}
             exp_annotations:
-              summary: "c: cannot authenticate to tenant t"
-              description: "Token request or Graph 401/403. Consent may be revoked or a permission missing. Run: m365c tenant verify c"
+              summary: "c: cannot authenticate to tenant t (secret_expired)"
+              description: "The client secret has expired (AADSTS7000222): create a new one in the client's app registration, replace the secret file and update auth.client_secret_expires. Run: m365c tenant verify c"
+          - exp_labels: {severity: critical, customer: c, tenant: t2}
+            exp_annotations:
+              summary: "c: cannot authenticate to tenant t2"
+              description: "Token request or Graph 401. Consent may be revoked or the app removed. Run: m365c tenant verify c"
+      - eval_time: 2h
+        alertname: M365ClientSecretExpiring
+        exp_alerts:
+          - exp_labels: {severity: warning, customer: c, tenant: t, client_id: cid1}
+            exp_annotations:
+              summary: "c: client secret of app cid1 for t expires in 10d 0h 0m 0s"
+              description: "Create a new client secret in the client tenant's app registration, write it to the tenant's secret file (picked up without a restart), then update auth.client_secret_expires. After expiry, M365TenantAuthFailed fires with reason=\"secret_expired\"."
+
       - eval_time: 2h
         alertname: M365PermissionMissing
         exp_alerts:
