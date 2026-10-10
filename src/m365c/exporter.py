@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
+from datetime import UTC, datetime
 
 import structlog
 from prometheus_client import CollectorRegistry
@@ -32,6 +33,10 @@ BUILTIN_HELP: dict[str, str] = {
         "Samples dropped because another sample had the same name and labels"
     ),
     "m365_cert_expiry_timestamp": "Unix time when the app registration certificate expires",
+    "m365_tenant_auth_error": "1 for the reason the tenant's authentication is failing",
+    "m365_client_secret_expiry_timestamp": (
+        "Unix time when the tenant's client secret expires (from auth.client_secret_expires)"
+    ),
 }
 
 
@@ -116,6 +121,17 @@ class M365Exporter(Collector):
             auth_ok = state.health.auth_ok(tenant.id)
             if auth_ok is not None:
                 out.add("m365_tenant_auth_ok", base, 1.0 if auth_ok else 0.0)
+            if auth_ok is False:
+                reason = state.health.tenant_auth_reason.get(tenant.id, "unknown")
+                out.add("m365_tenant_auth_error", {**base, "reason": reason}, 1.0)
+            auth = state.auth.get(tenant.id)
+            if auth is not None and auth.client_secret_expires is not None:
+                expires = auth.client_secret_expires
+                out.add(
+                    "m365_client_secret_expiry_timestamp",
+                    {**base, "client_id": auth.client_id},
+                    datetime(expires.year, expires.month, expires.day, tzinfo=UTC).timestamp(),
+                )
             for check, value in state.thresholds.resolve(tenant.customer).items():
                 out.add("m365_threshold", {**base, "check": check}, float(value))
 

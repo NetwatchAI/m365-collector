@@ -9,7 +9,8 @@ download URL (the path is the credential).
 
 Redaction: sensitive keys anywhere in nested mappings/sequences, plus credential-shaped
 text in any string (Bearer tokens, JWTs, PEM private keys, ``?tempauth=`` style query
-parameters, and ``key=value`` / ``'key': 'value'`` pairs for secret-like keys).
+parameters, and ``key=value`` / ``'key': 'value'`` pairs for secret-like keys), plus the
+literal values (and URL-encoded forms) of every secret loaded through ``m365c.secrets``.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from __future__ import annotations
 import logging
 import re
 import sys
+import urllib.parse
 from collections.abc import Mapping, MutableMapping
 from typing import Any
 
@@ -63,7 +65,31 @@ def is_sensitive_key(key: str) -> bool:
     return lowered in _EXACT_KEYS or "secret" in lowered or "token" in lowered
 
 
+# Literal secret values loaded at runtime (client secrets, passwords), plus their URL-encoded
+# forms: scrubbed from every string, whatever shape a library error message puts them in.
+_SENSITIVE_VALUES: set[str] = set()
+_MIN_SENSITIVE_LEN = 6
+_MAX_SENSITIVE_LEN = 4096  # PEM bundles are long and are caught by the PEM pattern instead
+
+
+def register_sensitive_value(value: bytes | str) -> None:
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("utf-8")
+        except UnicodeDecodeError:
+            return  # binary (PKCS#12): cannot appear in a text log line as-is
+    for candidate in {value, value.strip()}:
+        if _MIN_SENSITIVE_LEN <= len(candidate) <= _MAX_SENSITIVE_LEN:
+            _SENSITIVE_VALUES.add(candidate)
+            _SENSITIVE_VALUES.add(urllib.parse.quote(candidate, safe=""))
+            _SENSITIVE_VALUES.add(urllib.parse.quote_plus(candidate, safe=""))
+
+
 def scrub_string(value: str) -> str:
+    # Longest first, so a value is not left half-replaced by a shorter one it contains.
+    for secret in sorted(_SENSITIVE_VALUES, key=len, reverse=True):
+        if secret in value:
+            value = value.replace(secret, REDACTED)
     for pattern, repl in _VALUE_PATTERNS:
         value = pattern.sub(repl, value)
     return value
@@ -152,3 +178,6 @@ def configure_logging(level: str = "INFO", *, json: bool = True) -> None:
         logging.getLogger(name).setLevel(logging.WARNING)
     # azure-core's HTTP logging policy prints request/response headers at INFO.
     logging.getLogger("azure").setLevel(max(lvl, logging.WARNING))
+    # azure-identity logs a failed token request at WARNING with the identity service's raw
+    # error text, which may echo request data. m365c logs its own mapped, non-secret reason.
+    logging.getLogger("azure.identity").setLevel(logging.ERROR)

@@ -11,6 +11,9 @@ Auth is split in two signals:
   successful call sets it back to 1, so it recovers within one servicehealth cycle.
 - collector permission (``m365_collector_permission_ok``): 0 while the collector's last
   run got a Graph 403 (a missing application permission or licence-gated feature).
+
+Collectors whose required permissions are not in the tenant's token are *skipped*, not run
+(``m365_collector_enabled 0``, ``m365_collector_skipped{permission}``).
 """
 
 from __future__ import annotations
@@ -85,23 +88,52 @@ class RunHealth:
 class HealthState:
     runs: dict[tuple[str, str], RunHealth] = field(default_factory=dict)
     tenant_auth: dict[str, bool] = field(default_factory=dict)
+    # Why the tenant's auth is failing (AADSTS mapping, "secret_unavailable", "unauthorized").
+    tenant_auth_reason: dict[str, str] = field(default_factory=dict)
+    # Graph application roles in the tenant's current token, when it is a JWT.
+    tenant_roles: dict[str, frozenset[str]] = field(default_factory=dict)
+    # (tenant_id, collector) -> missing any-of permission groups, while skipped.
+    skipped: dict[tuple[str, str], tuple[tuple[str, ...], ...]] = field(default_factory=dict)
     attempted_any: bool = False
+
+    def _auth_ok(self, tenant_id: str) -> None:
+        self.tenant_auth[tenant_id] = True
+        self.tenant_auth_reason.pop(tenant_id, None)
 
     def record_success(self, tenant_id: str, collector: str, duration: float, samples: int) -> None:
         self.attempted_any = True
-        self.tenant_auth[tenant_id] = True
+        self._auth_ok(tenant_id)
+        self.skipped.pop((tenant_id, collector), None)
         self.runs[(tenant_id, collector)] = RunHealth(
             success=True, duration_s=duration, samples=samples, last_success_ts=time.time()
         )
 
+    def record_skipped(
+        self, tenant_id: str, collector: str, missing: tuple[tuple[str, ...], ...]
+    ) -> None:
+        """The collector was not run: the tenant's token lacks a required permission. Its
+        run health is dropped, so neither CollectorFailing nor CollectorStale fires."""
+        self.attempted_any = True
+        self._auth_ok(tenant_id)  # we got a token
+        self.skipped[(tenant_id, collector)] = missing
+        self.runs.pop((tenant_id, collector), None)
+
     def record_failure(
-        self, tenant_id: str, collector: str, duration: float, error: str, kind: FailureKind
+        self,
+        tenant_id: str,
+        collector: str,
+        duration: float,
+        error: str,
+        kind: FailureKind,
+        reason: str | None = None,
     ) -> None:
         self.attempted_any = True
         if kind in (FailureKind.TOKEN, FailureKind.UNAUTHORIZED):
             self.tenant_auth[tenant_id] = False
+            self.tenant_auth_reason[tenant_id] = reason or kind.value
         elif kind is FailureKind.FORBIDDEN:
-            self.tenant_auth[tenant_id] = True  # we got a token and Graph answered
+            self._auth_ok(tenant_id)  # we got a token and Graph answered
+        self.skipped.pop((tenant_id, collector), None)
         prev = self.runs.get((tenant_id, collector))
         self.runs[(tenant_id, collector)] = RunHealth(
             success=False,
@@ -135,7 +167,12 @@ class HealthState:
     def drop_tenant(self, tenant_id: str) -> None:
         for key in [k for k in self.runs if k[0] == tenant_id]:
             del self.runs[key]
+        for key in [k for k in self.skipped if k[0] == tenant_id]:
+            del self.skipped[key]
         self.tenant_auth.pop(tenant_id, None)
+        self.tenant_auth_reason.pop(tenant_id, None)
+        self.tenant_roles.pop(tenant_id, None)
 
     def drop(self, tenant_id: str, collector: str) -> None:
         self.runs.pop((tenant_id, collector), None)
+        self.skipped.pop((tenant_id, collector), None)

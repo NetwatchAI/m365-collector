@@ -95,3 +95,31 @@ def test_redaction_gaps_from_review(capsys: pytest.CaptureFixture[str]) -> None:
     for leak in ("LEAK_A", "LEAK_B", "LEAK_C", "LEAK_D", "LEAK_E"):
         assert leak not in out, leak
     assert "client_credentials" in out  # non-secret parts survive
+
+
+def test_loaded_secret_values_are_scrubbed_anywhere(
+    tmp_path: pytest.TempPathFactory,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Any secret loaded through m365c.secrets is scrubbed from every log line, in raw and
+    URL-encoded form, whatever key or message shape it appears in."""
+    from m365c.secrets import load_secret
+
+    monkeypatch.setenv("M365C_TEST_SCRUB", "Ab+c/d=e~fake secret 42")
+    load_secret("env:M365C_TEST_SCRUB")
+    configure_logging("DEBUG", json=True)
+    structlog.get_logger("t").error(
+        "boom", detail="identity said: Ab+c/d=e~fake secret 42 was wrong",
+        body="client_id=x&client_secret_value=Ab%2Bc%2Fd%3De~fake+secret+42",
+    )  # fmt: skip
+    logging.getLogger("azure.identity").error("echo %s", "Ab+c/d=e~fake secret 42")
+    out = capsys.readouterr().out
+    assert "fake secret 42" not in out and "fake+secret+42" not in out
+    assert out.count(REDACTED) >= 3
+
+
+def test_azure_identity_warnings_are_silenced(capsys: pytest.CaptureFixture[str]) -> None:
+    configure_logging("DEBUG", json=True)
+    logging.getLogger("azure.identity.aio._internal").warning("get_token failed: raw text")
+    assert "raw text" not in capsys.readouterr().out

@@ -14,7 +14,7 @@ import structlog
 from m365c.auth import TokenError
 from m365c.cache import Snapshot
 from m365c.collectors.base import CollectorContext, MetricSample
-from m365c.config import Settings, TenantConfig
+from m365c.config import Settings, TenantConfig, validate_auth
 from m365c.graph import GraphAuthError, GraphClient
 from m365c.health import FailureKind, forget_graph_counters
 from m365c.state import AppState
@@ -36,6 +36,15 @@ def classify_failure(exc: BaseException) -> FailureKind:
     if isinstance(exc, GraphAuthError):
         return FailureKind.UNAUTHORIZED if exc.status == 401 else FailureKind.FORBIDDEN
     return FailureKind.OTHER
+
+
+def failure_reason(exc: BaseException) -> str | None:
+    """Short label for m365_tenant_auth_error{reason}; None for non-auth failures."""
+    if isinstance(exc, TokenError):
+        return exc.reason
+    if isinstance(exc, GraphAuthError) and exc.status == 401:
+        return "unauthorized"
+    return None
 
 
 def next_delay(interval: float, consecutive_failures: int) -> float:
@@ -92,7 +101,14 @@ class Scheduler:
         return set(self._tasks)
 
     async def apply_tenants(self, tenants: list[TenantConfig]) -> None:
-        """Make running tasks match ``tenants``; drop cache/health for anything removed."""
+        """Make running tasks match ``tenants``; drop cache/health for anything removed.
+
+        Also hands every active tenant's effective auth to the token provider, which closes
+        credentials whose auth block changed (the secret is re-resolved on next use).
+        """
+        auths = validate_auth(self._settings, tenants)  # raises ConfigError before any change
+        await self._graph.tokens.configure(auths)
+        self._state.auth = auths
         old = self._state.tenants
         self._state.tenants = {t.id: t for t in tenants}
         new = self._state.tenants
@@ -153,7 +169,7 @@ class Scheduler:
                 )
             if write:
                 self._state.health.record_failure(
-                    tenant.id, collector_name, duration, str(exc), kind
+                    tenant.id, collector_name, duration, str(exc), kind, failure_reason(exc)
                 )
             return RunResult(tenant, collector_name, False, duration, error=str(exc))
 

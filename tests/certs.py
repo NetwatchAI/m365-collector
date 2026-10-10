@@ -6,15 +6,19 @@ from datetime import UTC, datetime, timedelta
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.hazmat.primitives.serialization import pkcs12
 from cryptography.x509.oid import NameOID
 
 
 def _make(
-    days_valid: float, *, start_days_ago: float = 1
-) -> tuple[ec.EllipticCurvePrivateKey, x509.Certificate]:
-    key = ec.generate_private_key(ec.SECP256R1())
+    days_valid: float, *, start_days_ago: float = 1, rsa_key: bool = False
+) -> tuple[ec.EllipticCurvePrivateKey | rsa.RSAPrivateKey, x509.Certificate]:
+    key: ec.EllipticCurvePrivateKey | rsa.RSAPrivateKey = (
+        rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        if rsa_key
+        else ec.generate_private_key(ec.SECP256R1())
+    )
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "m365c-test")])
     now = datetime.now(UTC)
     cert = (
@@ -30,8 +34,11 @@ def _make(
     return key, cert
 
 
-def pem_bundle(days_valid: float = 365, password: bytes | None = None) -> bytes:
-    key, cert = _make(days_valid, start_days_ago=max(1, -days_valid + 1))
+def pem_bundle(
+    days_valid: float = 365, password: bytes | None = None, *, rsa_key: bool = False
+) -> bytes:
+    """``rsa_key=True`` for bundles a real CertificateCredential must sign with (RS256)."""
+    key, cert = _make(days_valid, start_days_ago=max(1, -days_valid + 1), rsa_key=rsa_key)
     enc = (
         serialization.BestAvailableEncryption(password)
         if password

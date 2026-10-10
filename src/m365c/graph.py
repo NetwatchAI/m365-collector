@@ -123,6 +123,16 @@ class GraphClient:
             headers={"User-Agent": f"m365c/{__version__}"},
         )
 
+    @property
+    def tokens(self) -> TokenProvider:
+        return self._tokens
+
+    async def tenant_roles(self, tenant_id: str) -> frozenset[str] | None:
+        """Graph application roles in the tenant's token (fetching one if needed); None if
+        the token is not a JWT. Raises TokenError like any Graph call would."""
+        await self._tokens.get_token(tenant_id)
+        return self._tokens.granted_roles(tenant_id)
+
     def for_tenant(self, tenant: TenantConfig, collector: str | None = None) -> TenantGraph:
         return TenantGraph(self, tenant, collector)
 

@@ -17,7 +17,7 @@ from rich.table import Table
 
 from m365c.auth import (
     CertificateError,
-    CertificateTokenProvider,
+    TenantTokenProvider,
     TokenError,
     TokenProvider,
     decode_jwt_claims,
@@ -33,6 +33,8 @@ from m365c.config import (
     load_all,
     load_settings,
     load_tenants,
+    uses_default_certificate,
+    validate_auth,
     write_tenants,
 )
 from m365c.graph import GraphAuthError, GraphClient, GraphError
@@ -107,13 +109,17 @@ def main(
 # --------------------------------------------------------------------------- helpers
 
 
-def _token_provider(settings: Settings, fixtures: Path | None) -> TokenProvider:
+def _token_provider(
+    settings: Settings, tenants: list[TenantConfig], fixtures: Path | None
+) -> TokenProvider:
     if fixtures is not None:
         from m365c.fixtures import fixture_token_provider
 
         return fixture_token_provider(permissions())
-    cert, password, _ = load_app_certificate(settings.secrets.cert, settings.secrets.cert_password)
-    return CertificateTokenProvider(settings.app.client_id, cert, password)
+    if settings.secrets.cert is not None and uses_default_certificate(settings, tenants):
+        # Fail fast on a broken shared certificate, as the service does at startup.
+        load_app_certificate(settings.secrets.cert, settings.secrets.cert_password)
+    return TenantTokenProvider(validate_auth(settings, tenants))
 
 
 def _graph(settings: Settings, tokens: TokenProvider, fixtures: Path | None) -> GraphClient:
@@ -302,7 +308,7 @@ def tenant_verify(
     configure_logging(c.log_level if c.log_level.upper() != "INFO" else "WARNING", json=False)
     try:
         cfg = load_all(c.config_dir, list(all_collectors()))
-        tokens = _token_provider(cfg.settings, fixtures)
+        tokens = _token_provider(cfg.settings, cfg.tenants, fixtures)
     except (ConfigError, SecretError, CertificateError) as exc:
         raise _fail(str(exc)) from None
     tenants = _match(cfg.tenants, selector)
@@ -351,7 +357,7 @@ def run(
     collectors = all_collectors()
     try:
         cfg = load_all(c.config_dir, list(collectors))
-        tokens = _token_provider(cfg.settings, fixtures)
+        tokens = _token_provider(cfg.settings, cfg.tenants, fixtures)
     except (ConfigError, SecretError, CertificateError) as exc:
         raise _fail(str(exc)) from None
 

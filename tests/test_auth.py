@@ -7,11 +7,12 @@ import pytest
 
 from m365c.auth import (
     CertificateError,
-    CertificateTokenProvider,
+    TenantTokenProvider,
     TokenError,
     inspect_certificate,
     load_app_certificate,
 )
+from m365c.config import ResolvedAuth
 from m365c.secrets import SecretBytes
 
 from .certs import mismatched_bundle, pem_bundle, pfx_bundle
@@ -74,14 +75,22 @@ def test_load_app_certificate_names_reference_not_content(tmp_path: Path) -> Non
     assert password is None and cert_info.subject == "CN=m365c-test"
 
 
-async def test_garbage_certificate_maps_to_token_error() -> None:
-    """The credential parses the certificate lazily; that must surface as TokenError
-    (auth failure), not a bare ValueError. No network is touched: parsing fails first."""
-    provider = CertificateTokenProvider(
-        "00000000-0000-0000-0000-000000000000", SecretBytes(b"garbage")
-    )
+async def test_garbage_certificate_maps_to_token_error(tmp_path: Path) -> None:
+    """A tenant whose certificate cannot be used fails with TokenError (secret_unavailable),
+    not a bare ValueError, and without touching the network."""
+    garbage = tmp_path / "cert.pem"
+    garbage.write_bytes(b"garbage")
+    auth = ResolvedAuth("certificate", "00000000-0000-0000-0000-000000000000", f"file:{garbage}")
+    provider = TenantTokenProvider({TENANT: auth})
     with pytest.raises(TokenError) as info:
         await provider.get_token(TENANT)
     assert not info.value.transient
-    assert "unusable certificate" in str(info.value)
+    assert info.value.reason == "secret_unavailable"
+    assert "certificate unusable" in str(info.value)
     await provider.aclose()
+
+
+def test_secret_bytes_fingerprint_is_not_the_value() -> None:
+    secret = SecretBytes(b"hunter2-but-longer")
+    assert len(secret.fingerprint()) == 16 and "hunter2" not in secret.fingerprint()
+    assert SecretBytes(b"other").fingerprint() != secret.fingerprint()

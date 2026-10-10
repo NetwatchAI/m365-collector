@@ -2,8 +2,8 @@
 
 Three YAML files live in one config directory:
 
-- ``settings.yaml``   process settings (app identity, secrets, HTTP, server, cache, intervals)
-- ``tenants.yaml``    client tenants to collect from (hot reloaded)
+- ``settings.yaml``   process settings (default auth, secrets, HTTP, server, cache, intervals)
+- ``tenants.yaml``    client tenants to collect from, optionally with their own auth (hot reloaded)
 - ``thresholds.yaml`` alert thresholds, with per-customer overrides (hot reloaded)
 
 Every value can be overridden by an environment variable with the ``M365C_`` prefix,
@@ -19,13 +19,26 @@ import tempfile
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Literal
 
 import structlog
 import yaml
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    AfterValidator,
+    AliasChoices,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+
+from m365c.secrets import validate_ref
 
 log = structlog.get_logger(__name__)
 
@@ -70,24 +83,60 @@ def _validate_guid(value: str) -> str:
 
 
 Guid = Annotated[str, BeforeValidator(_validate_guid)]
+# A secret *reference* (file:, env:, vault:, keyvault:). Anything else is treated as a probable
+# inline secret and rejected without echoing it (hide_input_in_errors on every model).
+SecretRef = Annotated[str, AfterValidator(validate_ref)]
+
+AuthMethod = Literal["certificate", "client_secret"]
+ReportPeriod = Literal["D7", "D30", "D90", "D180"]
+OneDriveSource = Literal["report", "quota", "auto"]
 
 
 class _Strict(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
 
 # --------------------------------------------------------------------------- settings
 
 
 class AppConfig(_Strict):
+    """Default auth for tenants without their own ``auth:`` block."""
+
+    method: AuthMethod = "certificate"
     client_id: Guid
+    client_secret: SecretRef | None = Field(
+        default=None, description="Secret reference of the client secret (method client_secret)"
+    )
+    client_secret_expires: date | None = None
+
+    @model_validator(mode="after")
+    def _method_fields(self) -> AppConfig:
+        if self.method == "client_secret" and self.client_secret is None:
+            raise ValueError("method client_secret needs app.client_secret (a secret reference)")
+        if self.method != "client_secret" and (
+            self.client_secret is not None or self.client_secret_expires is not None
+        ):
+            raise ValueError("client_secret fields are only valid with method client_secret")
+        return self
 
 
 class SecretsConfig(_Strict):
-    cert: str = Field(description="Secret reference holding the PEM (or PKCS#12) certificate")
-    cert_password: str | None = Field(
+    cert: SecretRef | None = Field(
+        default=None,
+        description="Secret reference holding the PEM (or PKCS#12) certificate; required only "
+        "if some tenant uses certificate auth with the default certificate",
+    )
+    cert_password: SecretRef | None = Field(
         default=None, description="Optional secret reference for an encrypted key / PFX password"
     )
+
+
+class ReportsConfig(_Strict):
+    period: ReportPeriod = "D7"
+
+
+class OneDriveConfig(_Strict):
+    source: OneDriveSource = "report"
 
 
 class HttpConfig(_Strict):
@@ -117,11 +166,13 @@ def _yaml_sources(
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix="M365C_", env_nested_delimiter="__", extra="forbid"
+        env_prefix="M365C_", env_nested_delimiter="__", extra="forbid", hide_input_in_errors=True
     )
 
     app: AppConfig
-    secrets: SecretsConfig
+    secrets: SecretsConfig = SecretsConfig()
+    reports: ReportsConfig = ReportsConfig()
+    onedrive: OneDriveConfig = OneDriveConfig()
     http: HttpConfig = HttpConfig()
     server: ServerConfig = ServerConfig()
     cache: CacheConfig = CacheConfig()
@@ -145,10 +196,45 @@ class Settings(BaseSettings):
 _CUSTOMER_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
+class TenantAuth(_Strict):
+    """Per-tenant auth, overriding ``settings.yaml`` ``app:``. Secrets are references only."""
+
+    method: AuthMethod
+    client_id: Guid | None = Field(default=None, description="Default: app.client_id")
+    client_secret: SecretRef | None = None
+    client_secret_expires: date | None = Field(
+        default=None, description="Expiry of the client secret (the app cannot read it itself)"
+    )
+    cert: SecretRef | None = Field(default=None, description="Default: secrets.cert")
+    cert_password: SecretRef | None = None
+
+    @model_validator(mode="after")
+    def _method_fields(self) -> TenantAuth:
+        if self.method == "client_secret":
+            if self.client_secret is None:
+                raise ValueError("method client_secret needs client_secret (a secret reference)")
+            if self.cert is not None or self.cert_password is not None:
+                raise ValueError("cert fields are only valid with method certificate")
+        elif self.client_secret is not None or self.client_secret_expires is not None:
+            raise ValueError("client_secret fields are only valid with method client_secret")
+        return self
+
+
+class TenantReports(_Strict):
+    period: ReportPeriod | None = None
+
+
+class TenantOneDrive(_Strict):
+    source: OneDriveSource | None = None
+
+
 class TenantConfig(_Strict):
     id: Guid
     name: str = Field(min_length=1, description="Tenant display/domain name, used as label")
     customer: str = Field(description="Customer slug, used as label and for thresholds")
+    auth: TenantAuth | None = None
+    reports: TenantReports | None = None
+    onedrive: TenantOneDrive | None = None
     collectors: Literal["all"] | list[str] = "all"
     enabled: bool = True
 
@@ -166,7 +252,9 @@ class TenantConfig(_Strict):
 
 
 class TenantsFile(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="M365C_", extra="forbid")
+    model_config = SettingsConfigDict(
+        env_prefix="M365C_", extra="forbid", hide_input_in_errors=True
+    )
 
     tenants: list[TenantConfig] = Field(default_factory=list)
 
@@ -197,25 +285,38 @@ class TenantsFile(BaseSettings):
 # --------------------------------------------------------------------------- thresholds
 
 
+# The mail thresholds apply to the configured report period; the old ``_7d`` keys (named
+# after the original fixed period) are still accepted.
+_SENT = AliasChoices("mail_sent_max", "mail_sent_max_7d")
+_RECEIVED = AliasChoices("mail_received_max", "mail_received_max_7d")
+
+
 class ThresholdValues(_Strict):
     license_util_warn: float = Field(default=0.95, gt=0)
     storage_used_warn: float = Field(default=0.90, gt=0, le=1)
     inactive_days: float = Field(default=30, gt=0)
-    mail_sent_max_7d: float = Field(default=800, ge=0)
-    mail_received_max_7d: float = Field(default=800, ge=0)
+    mail_sent_max: float = Field(default=800, ge=0, validation_alias=_SENT)
+    mail_received_max: float = Field(default=800, ge=0, validation_alias=_RECEIVED)
+    mailbox_size_gb_min: float = Field(default=10, ge=0)
+    onedrive_size_gb_min: float = Field(default=1, ge=0)
 
 
 class ThresholdOverrides(_Strict):
     license_util_warn: float | None = Field(default=None, gt=0)
     storage_used_warn: float | None = Field(default=None, gt=0, le=1)
     inactive_days: float | None = Field(default=None, gt=0)
-    mail_sent_max_7d: float | None = Field(default=None, ge=0)
-    mail_received_max_7d: float | None = Field(default=None, ge=0)
+    mail_sent_max: float | None = Field(default=None, ge=0, validation_alias=_SENT)
+    mail_received_max: float | None = Field(default=None, ge=0, validation_alias=_RECEIVED)
+    mailbox_size_gb_min: float | None = Field(default=None, ge=0)
+    onedrive_size_gb_min: float | None = Field(default=None, ge=0)
 
 
 class Thresholds(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix="M365C_THRESHOLDS_", env_nested_delimiter="__", extra="forbid"
+        env_prefix="M365C_THRESHOLDS_",
+        env_nested_delimiter="__",
+        extra="forbid",
+        hide_input_in_errors=True,
     )
 
     defaults: ThresholdValues = ThresholdValues()
@@ -239,6 +340,73 @@ class Thresholds(BaseSettings):
         if override is not None:
             values.update(override.model_dump(exclude_none=True))
         return values
+
+
+# --------------------------------------------------------------------------- resolution
+
+
+@dataclass(frozen=True)
+class ResolvedAuth:
+    """Effective auth of one tenant: its own ``auth:`` block or the settings default."""
+
+    method: str
+    client_id: str
+    secret_ref: str  # client secret or certificate reference, never the value
+    password_ref: str | None = None
+    client_secret_expires: date | None = None
+
+
+def resolve_auth(settings: Settings, tenant: TenantConfig) -> ResolvedAuth:
+    auth, app = tenant.auth, settings.app
+    if auth is not None:
+        client_id = auth.client_id or app.client_id
+        if auth.method == "client_secret":
+            assert auth.client_secret is not None  # model validator
+            return ResolvedAuth(
+                "client_secret", client_id, auth.client_secret, None, auth.client_secret_expires
+            )
+        if auth.cert is not None:
+            return ResolvedAuth("certificate", client_id, auth.cert, auth.cert_password)
+        cert, password = settings.secrets.cert, settings.secrets.cert_password
+    elif app.method == "client_secret":
+        assert app.client_secret is not None  # model validator
+        return ResolvedAuth(
+            "client_secret", app.client_id, app.client_secret, None, app.client_secret_expires
+        )
+    else:
+        client_id = app.client_id
+        cert, password = settings.secrets.cert, settings.secrets.cert_password
+    if cert is None:
+        raise ConfigError(
+            f"tenant {tenant.name!r} uses certificate auth but settings.yaml has no secrets.cert "
+            "(set it, give the tenant auth.cert, or use auth.method: client_secret)"
+        )
+    return ResolvedAuth("certificate", client_id, cert, password)
+
+
+def validate_auth(settings: Settings, tenants: list[TenantConfig]) -> dict[str, ResolvedAuth]:
+    """Resolve auth for every enabled tenant; ConfigError if one cannot be resolved."""
+    return {t.id: resolve_auth(settings, t) for t in tenants if t.enabled}
+
+
+def uses_default_certificate(settings: Settings, tenants: list[TenantConfig]) -> bool:
+    cert = settings.secrets.cert
+    return cert is not None and any(
+        a.method == "certificate" and a.secret_ref == cert
+        for a in validate_auth(settings, tenants).values()
+    )
+
+
+def report_period(settings: Settings, tenant: TenantConfig) -> str:
+    if tenant.reports is not None and tenant.reports.period is not None:
+        return tenant.reports.period
+    return settings.reports.period
+
+
+def onedrive_source(settings: Settings, tenant: TenantConfig) -> str:
+    if tenant.onedrive is not None and tenant.onedrive.source is not None:
+        return tenant.onedrive.source
+    return settings.onedrive.source
 
 
 # --------------------------------------------------------------------------- loading
@@ -314,7 +482,7 @@ def write_tenants(config_dir: Path, tenants: list[TenantConfig], known: list[str
     """Validate, then atomically replace tenants.yaml (temp file + os.replace), so the
     hot-reload watcher never sees a partial or invalid file. Comments are not kept."""
     path = config_dir / TENANTS_FILE
-    data = {"tenants": [t.model_dump(mode="json") for t in tenants]}
+    data = {"tenants": [t.model_dump(mode="json", exclude_none=True) for t in tenants]}
     parse_tenants(data, path, known)  # raises ConfigError before anything is written
     text = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -365,11 +533,12 @@ class LoadedConfig:
 def load_all(config_dir: Path, known_collectors: list[str]) -> LoadedConfig:
     settings = load_settings(config_dir)
     validate_intervals(settings, known_collectors)
-    return LoadedConfig(
-        settings=settings,
-        tenants=load_tenants(config_dir, known_collectors),
-        thresholds=load_thresholds(config_dir),
-    )
+    tenants = load_tenants(config_dir, known_collectors)
+    try:
+        validate_auth(settings, tenants)
+    except ConfigError as exc:
+        raise ConfigError(f"{config_dir / TENANTS_FILE}: {exc}") from None
+    return LoadedConfig(settings=settings, tenants=tenants, thresholds=load_thresholds(config_dir))
 
 
 # --------------------------------------------------------------------------- hot reload
@@ -393,8 +562,10 @@ class ConfigWatcher:
         on_tenants: Callable[[list[TenantConfig]], Awaitable[None]],
         on_thresholds: Callable[[Thresholds], Awaitable[None]],
         interval: float,
+        settings: Settings | None = None,
     ) -> None:
         self._dir = config_dir
+        self._settings = settings
         self._known = known_collectors
         self._on_tenants = on_tenants
         self._on_thresholds = on_thresholds
@@ -412,6 +583,11 @@ class ConfigWatcher:
     async def _apply(self, name: str) -> None:
         if name == TENANTS_FILE:
             tenants = load_tenants(self._dir, self._known)
+            if self._settings is not None:
+                try:
+                    validate_auth(self._settings, tenants)
+                except ConfigError as exc:
+                    raise ConfigError(f"{self._dir / name}: {exc}") from None
             log.info("config_reloaded", file=name, tenants=len(tenants))
             await self._on_tenants(tenants)
         else:

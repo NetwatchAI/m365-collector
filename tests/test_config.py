@@ -147,8 +147,10 @@ def test_threshold_resolution_with_customer_override(cfg_dir: Path) -> None:
     assert contoso["license_util_warn"] == other["license_util_warn"] == 0.95
     assert set(contoso) == {
         "license_util_warn", "storage_used_warn", "inactive_days",
-        "mail_sent_max_7d", "mail_received_max_7d",
+        "mail_sent_max", "mail_received_max", "mailbox_size_gb_min", "onedrive_size_gb_min",
     }  # fmt: skip
+    # The fixture still uses the legacy `_7d` keys: they are accepted as aliases.
+    assert contoso["mail_sent_max"] == 800
 
 
 def test_thresholds_file_optional(tmp_path: Path) -> None:

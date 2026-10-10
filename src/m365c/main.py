@@ -16,13 +16,19 @@ from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_l
 from m365c import __version__
 from m365c.auth import (
     CertificateInfo,
-    CertificateTokenProvider,
+    TenantTokenProvider,
     TokenProvider,
     load_app_certificate,
 )
 from m365c.cache import SnapshotCache
 from m365c.collectors import all_collectors
-from m365c.config import ConfigWatcher, Thresholds, hot_reload_env_overrides, load_all
+from m365c.config import (
+    ConfigWatcher,
+    Thresholds,
+    hot_reload_env_overrides,
+    load_all,
+    uses_default_certificate,
+)
 from m365c.exporter import register
 from m365c.graph import GraphClient
 from m365c.health import REGISTRY
@@ -97,8 +103,8 @@ async def serve(
 ) -> None:
     """Run until SIGTERM/SIGINT (or ``stop`` is set).
 
-    ``tokens``/``transport``/``registry``/``stop`` exist for tests; in production the
-    certificate from settings is used and the real network is called.
+    ``tokens``/``transport``/``registry``/``stop`` exist for tests; in production each
+    tenant's configured auth method is used and the real network is called.
     """
     collectors = all_collectors()
     cfg = load_all(config_dir, list(collectors))
@@ -113,14 +119,17 @@ async def serve(
     state = AppState(collectors=collectors, cache=SnapshotCache(settings.cache.persist_dir))
     state.thresholds = cfg.thresholds
     if tokens is None:
-        # Parse and check the certificate now: a broken one must fail startup, not every
-        # token request later. Raises CertificateError / SecretError.
-        cert, password, info = load_app_certificate(
-            settings.secrets.cert, settings.secrets.cert_password
-        )
-        _log_certificate(info)
-        state.certificate = info
-        tokens = CertificateTokenProvider(settings.app.client_id, cert, password)
+        if settings.secrets.cert is not None and (
+            settings.app.method == "certificate" or uses_default_certificate(settings, cfg.tenants)
+        ):
+            # The shared default certificate is checked now, as before: a broken one must
+            # fail startup, not every tenant's token request later. Raises CertificateError /
+            # SecretError. Per-tenant secrets (client secrets, own certificates) load lazily,
+            # so one tenant's broken reference cannot stop the others.
+            _, _, info = load_app_certificate(settings.secrets.cert, settings.secrets.cert_password)
+            _log_certificate(info)
+            state.certificate = info
+        tokens = TenantTokenProvider()
 
     async with contextlib.AsyncExitStack() as stack:
         # Callbacks run in reverse order: this one runs last.
@@ -157,6 +166,7 @@ async def serve(
             on_tenants=scheduler.apply_tenants,
             on_thresholds=on_thresholds,
             interval=settings.reload_interval,
+            settings=settings,
         )
         watch_task = asyncio.create_task(watcher.run(), name="config-watcher")
 

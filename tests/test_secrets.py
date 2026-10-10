@@ -6,7 +6,7 @@ import pytest
 
 from m365c.auth import decode_jwt_claims
 from m365c.fixtures import fake_jwt
-from m365c.secrets import KeyVaultBackend, SecretError, VaultBackend, load_secret
+from m365c.secrets import KeyVaultBackend, SecretError, VaultBackend, load_secret, validate_ref
 
 
 def test_file_backend(tmp_path: Path) -> None:
@@ -27,10 +27,43 @@ def test_file_backend_errors(tmp_path: Path) -> None:
 
 
 def test_unknown_prefix() -> None:
-    with pytest.raises(SecretError, match="unsupported secret reference 'env'"):
-        load_secret("env:FOO")
+    with pytest.raises(SecretError, match="unsupported secret reference") as info:
+        load_secret("hunter2:not-a-ref")
+    assert "hunter2" not in str(info.value)  # a pasted secret is never echoed
     with pytest.raises(SecretError):
         load_secret("/run/secrets/no-prefix")
+
+
+def test_env_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("M365C_TEST_VALUE", "s3cret-from-env")
+    assert load_secret("env:M365C_TEST_VALUE").get() == b"s3cret-from-env"
+    monkeypatch.delenv("M365C_TEST_VALUE")
+    with pytest.raises(SecretError, match="env:M365C_TEST_VALUE: variable not set"):
+        load_secret("env:M365C_TEST_VALUE")
+    with pytest.raises(SecretError, match="env: expected"):
+        load_secret("env:not a name")
+
+
+@pytest.mark.parametrize(
+    "ref",
+    ["file:/run/secrets/x", "env:MY_SECRET", "vault:secret/m365c/x#value",
+     "keyvault:https://kv1.vault.azure.net/name"],
+)  # fmt: skip
+def test_validate_ref_accepts_references(ref: str) -> None:
+    assert validate_ref(ref) == ref
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["Zq8~abcDEF.ghi-123", "file:   ", "env:not valid", "vault:no-key", "s3cret:with-colon",
+     "keyvault:kv1/name"],
+)  # fmt: skip
+def test_validate_ref_rejects_literals_without_echo(value: str) -> None:
+    with pytest.raises(ValueError) as info:
+        validate_ref(value)
+    message = str(info.value)
+    assert "not a secret reference" in message and "file:/path" in message
+    assert value not in message
 
 
 def test_reference_parsing() -> None:

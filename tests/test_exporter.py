@@ -146,3 +146,32 @@ async def test_readyz_with_no_tenants(app_state: AppState) -> None:
     app_state.health.attempted_any = False
     async with TestClient(TestServer(build_app(app_state, CollectorRegistry()))) as client:
         assert (await client.get("/readyz")).status == 200
+
+
+def test_auth_error_reason_and_client_secret_expiry(
+    app_state: AppState, tenant: TenantConfig
+) -> None:
+    from datetime import date
+
+    from m365c.config import ResolvedAuth
+
+    app_state.auth = {
+        tenant.id: ResolvedAuth(
+            "client_secret", "33333333-3333-3333-3333-333333333333", "env:X", None,
+            date(2027, 3, 1),
+        )
+    }  # fmt: skip
+    app_state.health.record_failure(
+        tenant.id, "license", 0.1, "token request failed", FailureKind.TOKEN, "secret_expired"
+    )
+    m = scrape(app_state)
+    base = {"customer": "contoso", "tenant": "contoso.onmicrosoft.com"}
+    assert m["m365_tenant_auth_ok"] == [(base, 0.0)]
+    assert m["m365_tenant_auth_error"] == [({**base, "reason": "secret_expired"}, 1.0)]
+    assert m["m365_client_secret_expiry_timestamp"] == [
+        ({**base, "client_id": "33333333-3333-3333-3333-333333333333"}, 1803859200.0)
+    ]
+    # Recovery clears the reason.
+    app_state.health.record_success(tenant.id, "license", 0.1, 1)
+    m = scrape(app_state)
+    assert m["m365_tenant_auth_ok"] == [(base, 1.0)] and "m365_tenant_auth_error" not in m

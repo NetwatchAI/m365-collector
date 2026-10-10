@@ -1,19 +1,25 @@
 """Secret loading with pluggable backends selected by prefix.
 
 - ``file:/path``                                   read a file (always available)
+- ``env:VAR_NAME``                                 an environment variable (Docker, systemd)
 - ``vault:<mount>/<path>#<key>``                   HashiCorp Vault KV v2 (extra ``[vault]``)
 - ``keyvault:https://<kv>.vault.azure.net/<name>`` Azure Key Vault secret (extra ``[azure]``)
 
 Secrets are returned in memory as :class:`SecretBytes`, whose repr never shows the value.
-Nothing here writes secrets to disk or logs them.
+Nothing here writes secrets to disk or logs them. Every value loaded is registered with the
+log redactor, so it is scrubbed from any log line it might end up in.
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
+import re
 from pathlib import Path
 from typing import Any, Protocol
+
+from m365c.logging import register_sensitive_value
 
 
 class SecretError(Exception):
@@ -37,6 +43,10 @@ class SecretBytes:
     def __len__(self) -> int:
         return len(self._value)
 
+    def fingerprint(self) -> str:
+        """Short SHA-256 of the value: identifies a rotation without revealing the secret."""
+        return hashlib.sha256(self._value).hexdigest()[:16]
+
 
 class SecretBackend(Protocol):
     def load(self, ref: str) -> bytes: ...
@@ -51,6 +61,24 @@ class FileBackend:
             raise SecretError(f"file:{ref}: file not found") from exc
         except OSError as exc:
             raise SecretError(f"file:{ref}: cannot read ({exc.strerror})") from exc
+
+
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+class EnvBackend:
+    @staticmethod
+    def parse(ref: str) -> str:
+        if not _ENV_NAME.match(ref):
+            raise SecretError("env: expected env:VAR_NAME (letters, digits, underscore)")
+        return ref
+
+    def load(self, ref: str) -> bytes:
+        name = self.parse(ref)
+        value = os.environ.get(name)
+        if value is None:
+            raise SecretError(f"env:{name}: variable not set")
+        return value.encode("utf-8")
 
 
 class VaultBackend:
@@ -166,20 +194,68 @@ class KeyVaultBackend:
 
 BACKENDS: dict[str, SecretBackend] = {
     "file": FileBackend(),
+    "env": EnvBackend(),
     "vault": VaultBackend(),
     "keyvault": KeyVaultBackend(),
 }
+
+_REF_HINT = (
+    "not a secret reference: use file:/path, env:VAR_NAME, vault:<mount>/<path>#<key> or "
+    "keyvault:https://<kv>.vault.azure.net/<name>. Inline secret values are not allowed in "
+    "configuration (the value is not shown here)"
+)
+
+
+def validate_ref(ref: str) -> str:
+    """Check that ``ref`` is a well-formed secret reference.
+
+    Anything that does not parse as one is treated as a probable literal secret: the error
+    never contains the value, not even its prefix.
+    """
+    prefix, sep, rest = ref.partition(":")
+    if not sep or prefix not in BACKENDS or not rest.strip():
+        raise ValueError(_REF_HINT)
+    try:
+        if prefix == "env":
+            EnvBackend.parse(rest)
+        elif prefix == "vault":
+            VaultBackend.parse(rest)
+        elif prefix == "keyvault":
+            KeyVaultBackend.parse(rest)
+    except SecretError:
+        raise ValueError(_REF_HINT) from None
+    return ref
+
+
+def ref_backend(ref: str) -> str:
+    """The backend prefix of a reference (safe to log)."""
+    prefix = ref.partition(":")[0]
+    return prefix if prefix in BACKENDS else "unknown"
+
+
+def file_signature(ref: str) -> tuple[int, int] | None:
+    """``(mtime_ns, size)`` of a ``file:`` reference, to notice a rotated secret file; None
+    for other backends or when the file cannot be stat'ed."""
+    prefix, _, rest = ref.partition(":")
+    if prefix != "file":
+        return None
+    try:
+        st = Path(rest).stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
 
 
 def load_secret(ref: str) -> SecretBytes:
     """Resolve a ``<backend>:<ref>`` secret reference."""
     prefix, sep, rest = ref.partition(":")
     if not sep or prefix not in BACKENDS:
+        # Never echo the reference: it may be a pasted secret value.
         raise SecretError(
-            f"unsupported secret reference {ref.split(':', 1)[0]!r}; "
-            f"use one of {', '.join(p + ':' for p in BACKENDS)}"
+            f"unsupported secret reference; use one of {', '.join(p + ':' for p in BACKENDS)}"
         )
     value = BACKENDS[prefix].load(rest)
-    if not value:
+    if not value.strip():
         raise SecretError(f"{prefix}: secret is empty")
+    register_sensitive_value(value)
     return SecretBytes(value)
