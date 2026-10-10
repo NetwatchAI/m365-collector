@@ -8,7 +8,7 @@ from m365c.collectors.base import BaseCollector, CollectorContext, MetricSample,
 class AppSecretsCollector(BaseCollector):
     name = "appsecrets"
     default_interval = 24 * 3600.0
-    required_permissions = ("Application.Read.All",)
+    required_permissions = (("Application.Read.All",),)
     metric_help: ClassVar[dict[str, str]] = {
         "m365_app_credential_expiry_timestamp": (
             "Unix time when an app registration's client secret or certificate expires"

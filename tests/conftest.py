@@ -11,7 +11,7 @@ import structlog
 from m365c.auth import StaticTokenProvider
 from m365c.cache import SnapshotCache
 from m365c.collectors import all_collectors
-from m365c.collectors.base import CollectorContext
+from m365c.collectors.base import CollectorContext, MetricSample, TenantOptions
 from m365c.config import HttpConfig, TenantConfig, Thresholds
 from m365c.fixtures import fixture_transport
 from m365c.graph import GraphClient
@@ -76,14 +76,26 @@ async def fixture_graph() -> AsyncIterator[GraphClient]:
 
 
 def make_ctx(
-    graph: GraphClient, tenant: TenantConfig, state: dict[str, Any] | None = None
+    graph: GraphClient,
+    tenant: TenantConfig,
+    state: dict[str, Any] | None = None,
+    *,
+    roles: frozenset[str] | None = None,
+    options: TenantOptions | None = None,
+    peers: dict[str, tuple[MetricSample, ...]] | None = None,
 ) -> CollectorContext:
     return CollectorContext(
         tenant=tenant,
         graph=graph.for_tenant(tenant),
         log=structlog.get_logger("test").bind(tenant=tenant.name),
         state=state if state is not None else {},
+        roles=roles,
+        options=options or TenantOptions(),
+        peer_samples=lambda name: (peers or {}).get(name, ()),
     )
+
+
+QUOTA = TenantOptions(onedrive_source="quota")
 
 
 @pytest.fixture

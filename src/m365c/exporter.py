@@ -14,6 +14,7 @@ from prometheus_client.metrics_core import Metric
 from prometheus_client.registry import Collector
 
 from m365c import __version__
+from m365c.collectors import permissions
 from m365c.health import FailureKind
 from m365c.state import AppState
 
@@ -34,6 +35,15 @@ BUILTIN_HELP: dict[str, str] = {
     ),
     "m365_cert_expiry_timestamp": "Unix time when the app registration certificate expires",
     "m365_tenant_auth_error": "1 for the reason the tenant's authentication is failing",
+    "m365_collector_enabled": (
+        "1 if the collector runs for the tenant, 0 if skipped for a missing permission"
+    ),
+    "m365_collector_skipped": (
+        "1 per missing permission group (alternatives joined by |) of a skipped collector"
+    ),
+    "m365_tenant_permission": (
+        "1 if the tenant's token holds the Graph application role, 0 if not (roles m365c uses)"
+    ),
     "m365_client_secret_expiry_timestamp": (
         "Unix time when the tenant's client secret expires (from auth.client_secret_expires)"
     ),
@@ -106,6 +116,7 @@ class M365Exporter(Collector):
                 continue
             labels = {"customer": tenant.customer, "tenant": tenant.name, "collector": collector}
             if not run.restored:  # restored snapshots only carry their collection time
+                out.add("m365_collector_enabled", labels, 1.0)
                 out.add("m365_collector_success", labels, 1.0 if run.success else 0.0)
                 out.add("m365_collector_duration_seconds", labels, run.duration_s)
                 out.add("m365_collector_samples", labels, float(run.samples))
@@ -116,8 +127,32 @@ class M365Exporter(Collector):
             if run.last_success_ts is not None:
                 out.add("m365_collector_last_success_timestamp", labels, run.last_success_ts)
 
+        for (tenant_id, collector), missing in list(state.health.skipped.items()):
+            tenant = state.tenants.get(tenant_id)
+            if tenant is None or not tenant.enabled:
+                continue
+            labels = {"customer": tenant.customer, "tenant": tenant.name, "collector": collector}
+            out.add("m365_collector_enabled", labels, 0.0)
+            if collector in state.intervals:
+                out.add("m365_collector_interval_seconds", labels, state.intervals[collector])
+            for group in missing:
+                out.add(
+                    "m365_collector_skipped",
+                    {**labels, "reason": "missing_permission", "permission": "|".join(group)},
+                    1.0,
+                )
+
+        known_permissions = permissions()
         for tenant in state.active_tenants():
             base = {"customer": tenant.customer, "tenant": tenant.name}
+            roles = state.health.tenant_roles.get(tenant.id)
+            if roles is not None:
+                for permission in known_permissions:
+                    out.add(
+                        "m365_tenant_permission",
+                        {**base, "permission": permission},
+                        1.0 if permission in roles else 0.0,
+                    )
             auth_ok = state.health.auth_ok(tenant.id)
             if auth_ok is not None:
                 out.add("m365_tenant_auth_ok", base, 1.0 if auth_ok else 0.0)

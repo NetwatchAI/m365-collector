@@ -900,7 +900,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "topk(10, m365_mail_sent_7d{customer=~\"$customer\",tenant=~\"$tenant\"})",
+          "expr": "topk(10, m365_mail_sent{customer=~\"$customer\",tenant=~\"$tenant\"})",
           "refId": "A",
           "legendFormat": "{{upn}}",
           "instant": true,
@@ -957,7 +957,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "topk(10, m365_mail_received_7d{customer=~\"$customer\",tenant=~\"$tenant\"})",
+          "expr": "topk(10, m365_mail_received{customer=~\"$customer\",tenant=~\"$tenant\"})",
           "refId": "A",
           "legendFormat": "{{upn}}",
           "instant": true,

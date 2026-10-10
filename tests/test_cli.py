@@ -29,9 +29,23 @@ def invoke(*args: str) -> tuple[int, str]:
 
 
 def test_permissions() -> None:
-    code, output = invoke("permissions")
+    code, output = invoke("permissions", "--all")
     assert code == 0
     assert output.split() == permissions()
+    # The minimal set for template parity is exactly what the legacy apps were granted.
+    code, output = invoke("permissions", "--parity")
+    assert code == 0
+    assert output.splitlines() == [
+        "Reports.Read.All",
+        "User.Read.All",
+        "AuditLog.Read.All",
+        "Organization.Read.All or LicenseAssignment.Read.All",
+    ]
+    code, output = invoke("permissions")
+    assert code == 0
+    for text in ("license", "Organization.Read.All or LicenseAssignment.Read.All",
+                 "ReportSettings.Read.All", "Files.Read.All", "Minimal set for Zabbix template parity"):  # fmt: skip
+        assert text in output
 
 
 def test_run_dry_run_against_fixtures_json(cfg_dir: Path) -> None:

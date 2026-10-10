@@ -102,12 +102,12 @@ groups:
       - alert: M365HighMailTraffic
         expr: |
           label_replace(
-            m365_mail_sent_7d > on(customer, tenant) group_left m365_threshold{check="mail_sent_max_7d"},
+            m365_mail_sent > on(customer, tenant) group_left m365_threshold{check="mail_sent_max"},
             "direction", "sent", "", ""
           )
           or
           label_replace(
-            m365_mail_received_7d > on(customer, tenant) group_left m365_threshold{check="mail_received_max_7d"},
+            m365_mail_received > on(customer, tenant) group_left m365_threshold{check="mail_received_max"},
             "direction", "received", "", ""
           )
         for: 1h

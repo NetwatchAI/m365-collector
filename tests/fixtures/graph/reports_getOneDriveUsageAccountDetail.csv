@@ -1,0 +1,4 @@
+﻿Report Refresh Date,Site URL,Owner Display Name,Is Deleted,Last Activity Date,File Count,Active File Count,Storage Used (Byte),Storage Allocated (Byte),Owner Principal Name,Report Period
+2026-10-06,https://contoso-my.sharepoint.com/personal/alice_contoso_onmicrosoft_com,"Example, Alice",False,2026-10-04,4321,120,2147483648,1099511627776,Alice@contoso.onmicrosoft.com,7
+2026-10-06,https://contoso-my.sharepoint.com/personal/bob_contoso_onmicrosoft_com,Bob Example,False,,0,0,1048576,1099511627776,bob@contoso.onmicrosoft.com,7
+2026-10-06,https://contoso-my.sharepoint.com/personal/ghost_contoso_onmicrosoft_com,"Ghost, Former",True,2026-08-30,10,0,5368709120,1099511627776,ghost@contoso.onmicrosoft.com,7

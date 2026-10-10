@@ -281,7 +281,7 @@ row("Mail", y)
 y += 1
 bargauge(
     "Top 10 senders (7d)",
-    f"topk(10, m365_mail_sent_7d{{{SEL}}})",
+    f"topk(10, m365_mail_sent{{{SEL}}})",
     "{{upn}}",
     0,
     y,
@@ -293,7 +293,7 @@ bargauge(
 )
 bargauge(
     "Top 10 receivers (7d)",
-    f"topk(10, m365_mail_received_7d{{{SEL}}})",
+    f"topk(10, m365_mail_received{{{SEL}}})",
     "{{upn}}",
     12,
     y,

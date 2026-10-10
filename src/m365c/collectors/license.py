@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from m365c.collectors.base import BaseCollector, CollectorContext, MetricSample
+from m365c.collectors.base import BaseCollector, CollectorContext, MetricSample, Requirement
+
+# subscribedSkus: least privileged LicenseAssignment.Read.All, or Organization.Read.All.
+LICENSE_READ: Requirement = ("Organization.Read.All", "LicenseAssignment.Read.All")
 
 
 class LicenseCollector(BaseCollector):
     name = "license"
     default_interval = 3600.0
-    required_permissions = ("LicenseAssignment.Read.All",)
+    required_permissions = (LICENSE_READ,)
     metric_help: ClassVar[dict[str, str]] = {
         "m365_license_total": "Enabled (prepaid) units of the SKU",
         "m365_license_consumed": "Assigned units of the SKU",

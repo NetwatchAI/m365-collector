@@ -148,13 +148,13 @@ tests:
   # ------------------------------------------------------------------ mail
   - interval: 1m
     input_series:
-      - series: 'm365_threshold{customer="c",tenant="t",check="mail_sent_max_7d"}'
+      - series: 'm365_threshold{customer="c",tenant="t",check="mail_sent_max"}'
         values: '800x120'
-      - series: 'm365_threshold{customer="c",tenant="t",check="mail_received_max_7d"}'
+      - series: 'm365_threshold{customer="c",tenant="t",check="mail_received_max"}'
         values: '800x120'
-      - series: 'm365_mail_sent_7d{customer="c",tenant="t",upn="spam@x"}'
+      - series: 'm365_mail_sent{customer="c",tenant="t",upn="spam@x"}'
         values: '900x120'
-      - series: 'm365_mail_received_7d{customer="c",tenant="t",upn="spam@x"}'
+      - series: 'm365_mail_received{customer="c",tenant="t",upn="spam@x"}'
         values: '10x120'
       - series: 'm365_reports_concealed{customer="c",tenant="t",report="mailbox"}'
         values: '1x120'

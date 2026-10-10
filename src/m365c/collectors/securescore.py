@@ -10,7 +10,7 @@ PAGE = 7
 class SecureScoreCollector(BaseCollector):
     name = "securescore"
     default_interval = 24 * 3600.0
-    required_permissions = ("SecurityEvents.Read.All",)
+    required_permissions = (("SecurityEvents.Read.All",),)
     metric_help: ClassVar[dict[str, str]] = {
         "m365_securescore_current": "Microsoft Secure Score, current points",
         "m365_securescore_max": "Microsoft Secure Score, maximum achievable points",

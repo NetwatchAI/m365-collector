@@ -20,11 +20,20 @@ from m365c.auth import (
     TenantTokenProvider,
     TokenError,
     TokenProvider,
-    decode_jwt_claims,
     load_app_certificate,
 )
 from m365c.cache import SnapshotCache
-from m365c.collectors import all_collectors, permissions
+from m365c.collectors import (
+    PARITY_COLLECTORS,
+    PARITY_PERMISSIONS,
+    TenantOptions,
+    all_collectors,
+    format_requirement,
+    permissions,
+)
+from m365c.collectors.onedrive import effective_source
+from m365c.collectors.reports import REPORT_SETTINGS
+from m365c.collectors.users import SIGNIN_READ
 from m365c.config import (
     TENANTS_FILE,
     ConfigError,
@@ -33,6 +42,9 @@ from m365c.config import (
     load_all,
     load_settings,
     load_tenants,
+    onedrive_source,
+    report_period,
+    resolve_auth,
     uses_default_certificate,
     validate_auth,
     write_tenants,
@@ -62,7 +74,7 @@ out = _Out()
 
 OK, FAIL, SKIP = "✅", "❌", "➖"
 CONSENT_URL = "https://login.microsoftonline.com/{tenant}/adminconsent?client_id={client_id}"
-REPORT_COLLECTORS = {"mailbox", "mailtraffic"}
+REPORT_COLLECTORS = {"mailbox", "mailtraffic", "onedrive"}
 
 FixturesOpt = Annotated[
     Path | None,
@@ -166,10 +178,38 @@ def serve(ctx: typer.Context, fixtures: FixturesOpt = None) -> None:
 
 
 @app.command("permissions")
-def permissions_cmd() -> None:
-    """Print the Graph application permissions the app registration needs."""
-    for perm in permissions():
-        out.print(perm, highlight=False)
+def permissions_cmd(
+    parity: Annotated[
+        bool, typer.Option("--parity", help="Only the minimal set for Zabbix template parity")
+    ] = False,
+    flat: Annotated[
+        bool, typer.Option("--all", help="Only a flat list of every role any collector uses")
+    ] = False,
+) -> None:
+    """Graph application permissions: required and optional per collector, and the minimal
+    set for template parity (what the legacy client app registrations already have)."""
+    if flat:
+        for perm in permissions():
+            out.print(perm, highlight=False)
+        return
+    parity_lines = [format_requirement(g) for g in PARITY_PERMISSIONS]
+    if parity:
+        for line in parity_lines:
+            out.print(line, highlight=False)
+        return
+    table = Table("collector", "required (every line; 'or' = any one)", "optional: adds", "parity")
+    for name, c in all_collectors().items():
+        table.add_row(
+            name,
+            "\n".join(format_requirement(g) for g in c.required_permissions),
+            "\n".join(f"{format_requirement(g)}: {what}" for g, what in c.optional_permissions),
+            OK if name in PARITY_COLLECTORS else SKIP,
+        )
+    out.print(table)
+    out.print("Minimal set for Zabbix template parity (license, users, mailbox, mailtraffic,")
+    out.print("onedrive with source: report):")
+    for line in parity_lines:
+        out.print(f"  {line}", highlight=False)
 
 
 # --------------------------------------------------------------------------- tenant
@@ -238,35 +278,73 @@ class Check:
 
 
 async def _verify_tenant(
-    tenant: TenantConfig, tokens: TokenProvider, graph: GraphClient
+    tenant: TenantConfig, tokens: TokenProvider, graph: GraphClient, settings: Settings
 ) -> list[Check]:
-    enabled = tenant.enabled_collectors(list(all_collectors()))
+    collectors = all_collectors()
+    configured = tenant.enabled_collectors(list(collectors))
+    explicit = tenant.collectors != "all"
     checks: list[Check] = []
     try:
-        token = await tokens.get_token(tenant.id)
+        auth = resolve_auth(settings, tenant)
+        checks.append(Check("auth", OK, f"{auth.method}, client {auth.client_id}"))
+    except ConfigError as exc:
+        return [Check("auth", FAIL, str(exc))]
+    try:
+        await tokens.get_token(tenant.id)
     except TokenError as exc:
-        checks.append(Check("token", FAIL, str(exc)))
+        checks.append(Check("token", FAIL, f"{exc} [reason: {exc.reason}]"))
         skip = "skipped: no token"
         return [*checks, *(Check(n, SKIP, skip) for n in ("permissions", "reports", "signin"))]
     checks.append(Check("token", OK, "token acquired"))
 
-    try:
-        roles = set(decode_jwt_claims(token).get("roles") or [])
-    except ValueError:
-        roles = set()
-    missing = sorted(set(permissions(enabled)) - roles)
-    checks.append(
-        Check("permissions", FAIL, "missing: " + ", ".join(missing))
-        if missing
-        else Check("permissions", OK, f"{len(permissions(enabled))} required roles granted")
-    )
+    # Roles come from the token's roles claim, decoded locally; the token is never shown.
+    roles = tokens.granted_roles(tenant.id)
+    if roles is None:
+        checks.append(Check("permissions", SKIP, "token has no roles claim: collectors not gated"))
+    else:
+        relevant = sorted(roles & set(permissions()))
+        checks.append(Check("permissions", OK, "granted: " + (", ".join(relevant) or "none")))
+
+    options = TenantOptions(report_period(settings, tenant), onedrive_source(settings, tenant))
+    running: set[str] = set()
+    for name in configured:
+        collector = collectors[name]
+        missing = collector.missing_permissions(options, roles)
+        if missing:
+            # Listed explicitly but cannot run: that needs fixing. Under `all` it is expected.
+            status = FAIL if explicit else SKIP
+            detail = "skipped: missing " + "; ".join(format_requirement(g) for g in missing)
+        else:
+            running.add(name)
+            status, detail = OK, "runs"
+            if name == "onedrive":
+                detail += f" (source {effective_source(options.onedrive_source, roles)})"
+        extras = [
+            f"{format_requirement(g)} would add {what}"
+            for g, what in collector.optional_permissions
+            if roles is not None and not roles & set(g)
+        ]
+        if extras:
+            detail += "; optional: " + "; ".join(extras)
+        checks.append(Check(f"collector {name}", status, detail))
 
     tg = graph.for_tenant(tenant)
-    if REPORT_COLLECTORS & set(enabled):
-        try:
-            concealed = bool(
-                (await tg.get_json("/admin/reportSettings")).get("displayConcealedNames")
+    if not REPORT_COLLECTORS & running:
+        checks.append(Check("reports", SKIP, "no report collectors running"))
+    elif roles is not None and not roles & set(REPORT_SETTINGS):
+        checks.append(
+            Check(
+                "reports",
+                SKIP,
+                "ReportSettings.Read.All not granted: concealment is inferred from report data",
             )
+        )
+    else:
+        try:
+            body = await tg.get_json("/admin/reportSettings")
+            value = body.get("value")
+            flags = value if isinstance(value, dict) else body
+            concealed = bool(flags.get("displayConcealedNames"))
             checks.append(
                 Check(
                     "reports",
@@ -277,12 +355,25 @@ async def _verify_tenant(
                     else "report names not concealed",
                 )
             )
+        except GraphAuthError as exc:
+            checks.append(
+                Check("reports", SKIP, f"{exc.code}: concealment is inferred from report data")
+            )
         except GraphError as exc:
             checks.append(Check("reports", FAIL, f"{exc.status} {exc.code}"))
-    else:
-        checks.append(Check("reports", SKIP, "no report collectors enabled"))
 
-    if "users" in enabled:
+    if "users" not in running:
+        checks.append(Check("signin", SKIP, "users collector not running"))
+    elif roles is not None and not roles & set(SIGNIN_READ):
+        checks.append(
+            Check(
+                "signin",
+                SKIP,
+                "AuditLog.Read.All not granted: no last sign-in; last activity falls back to "
+                "the mailbox report",
+            )
+        )
+    else:
         try:
             await tg.get_json("/users", {"$select": "id,signInActivity", "$top": "1"})
             checks.append(Check("signin", OK, "signInActivity available"))
@@ -292,8 +383,6 @@ async def _verify_tenant(
             )
         except GraphError as exc:
             checks.append(Check("signin", FAIL, f"{exc.status} {exc.code}"))
-    else:
-        checks.append(Check("signin", SKIP, "users collector not enabled"))
     return checks
 
 
@@ -303,7 +392,8 @@ def tenant_verify(
     selector: Annotated[str, typer.Argument(help="Customer slug, tenant name or tenant id")],
     fixtures: FixturesOpt = None,
 ) -> None:
-    """Check token, granted permissions, report concealment and signInActivity."""
+    """Check auth, token, which collectors run or are skipped (and why), report
+    concealment and signInActivity."""
     c = _ctx(ctx)
     configure_logging(c.log_level if c.log_level.upper() != "INFO" else "WARNING", json=False)
     try:
@@ -318,7 +408,7 @@ def tenant_verify(
     async def run() -> list[tuple[TenantConfig, list[Check]]]:
         graph = _graph(cfg.settings, tokens, fixtures)
         try:
-            return [(t, await _verify_tenant(t, tokens, graph)) for t in tenants]
+            return [(t, await _verify_tenant(t, tokens, graph, cfg.settings)) for t in tenants]
         finally:
             await graph.aclose()
             await tokens.aclose()
@@ -396,6 +486,7 @@ def run(
                 "collector": r.collector,
                 "ok": r.ok,
                 "error": r.error,
+                "skipped_missing": [format_requirement(g) for g in r.skipped],
                 "duration_s": round(r.duration_s, 3),
                 "samples": [s.to_json() for s in r.samples],
             }
@@ -407,6 +498,9 @@ def run(
         for r in results:
             if not r.ok:
                 table.add_row(r.tenant.name, r.collector, f"{FAIL} {r.error}", "", "")
+            if r.skipped:
+                missing = "; ".join(format_requirement(g) for g in r.skipped)
+                table.add_row(r.tenant.name, r.collector, f"{SKIP} skipped: missing {missing}")
             for s in r.samples:
                 labels = ",".join(f'{k}="{v}"' for k, v in s.labels.items())
                 table.add_row(r.tenant.name, r.collector, s.name, labels, f"{s.value:g}")

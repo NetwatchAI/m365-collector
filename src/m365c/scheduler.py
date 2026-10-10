@@ -13,8 +13,14 @@ import structlog
 
 from m365c.auth import TokenError
 from m365c.cache import Snapshot
-from m365c.collectors.base import CollectorContext, MetricSample
-from m365c.config import Settings, TenantConfig, validate_auth
+from m365c.collectors.base import CollectorContext, MetricSample, Requirement, TenantOptions
+from m365c.config import (
+    Settings,
+    TenantConfig,
+    onedrive_source,
+    report_period,
+    validate_auth,
+)
 from m365c.graph import GraphAuthError, GraphClient
 from m365c.health import FailureKind, forget_graph_counters
 from m365c.state import AppState
@@ -26,6 +32,7 @@ MAX_INITIAL_JITTER_S = 300.0
 # (and never later than the normal interval).
 RETRY_BASE_S = 300.0
 RETRY_CAP_S = 3600.0
+SKIPPED_RECHECK_S = 3600.0
 
 Key = tuple[str, str]
 
@@ -61,6 +68,8 @@ class RunResult:
     duration_s: float
     samples: list[MetricSample] = field(default_factory=list)
     error: str | None = None
+    # Missing permission groups when the collector was skipped (not run).
+    skipped: tuple[Requirement, ...] = ()
 
 
 class Scheduler:
@@ -80,6 +89,7 @@ class Scheduler:
         self._sleep = sleep
         self._tasks: dict[Key, asyncio.Task[None]] = {}
         self._memory: dict[Key, dict[str, Any]] = {}
+        self._skip_warned: dict[Key, tuple[Requirement, ...]] = {}
         state.intervals = {name: self.interval(name) for name in state.collectors}
 
     # ------------------------------------------------------------------ config
@@ -88,6 +98,12 @@ class Scheduler:
         override = self._settings.intervals.get(collector)
         return (
             override if override is not None else self._state.collectors[collector].default_interval
+        )
+
+    def options(self, tenant: TenantConfig) -> TenantOptions:
+        return TenantOptions(
+            report_period=report_period(self._settings, tenant),
+            onedrive_source=onedrive_source(self._settings, tenant),
         )
 
     def desired_keys(self) -> set[Key]:
@@ -130,6 +146,7 @@ class Scheduler:
             task = self._tasks.pop(key)
             task.cancel()
             self._memory.pop(key, None)
+            self._skip_warned.pop(key, None)
             self._state.cache.drop(*key)
             self._state.health.drop(*key)
         for key in sorted(desired - self.task_keys):
@@ -144,14 +161,26 @@ class Scheduler:
         collector = self._state.collectors[collector_name]
         key = (tenant.id, collector_name)
         clog = log.bind(tenant=tenant.name, customer=tenant.customer, collector=collector_name)
-        ctx = CollectorContext(
-            tenant=tenant,
-            graph=self._graph.for_tenant(tenant, collector_name),
-            log=clog,
-            state=self._memory.setdefault(key, {}),
-        )
+        options = self.options(tenant)
         start = time.perf_counter()
         try:
+            # Gate on the roles in the tenant's current token (a new token after new consent
+            # is picked up here, without a restart). Unknown roles (not a JWT): no gating.
+            roles = await self._graph.tenant_roles(tenant.id)
+            if write and roles is not None:
+                self._state.health.tenant_roles[tenant.id] = roles
+            missing = collector.missing_permissions(options, roles)
+            if missing:
+                return self._skip(tenant, collector_name, missing, start, clog, write=write)
+            ctx = CollectorContext(
+                tenant=tenant,
+                graph=self._graph.for_tenant(tenant, collector_name),
+                log=clog,
+                state=self._memory.setdefault(key, {}),
+                roles=roles,
+                options=options,
+                peer_samples=lambda name: self._peer_samples(tenant.id, name),
+            )
             samples = await collector.collect(ctx)
         except asyncio.CancelledError:
             raise
@@ -174,6 +203,8 @@ class Scheduler:
             return RunResult(tenant, collector_name, False, duration, error=str(exc))
 
         duration = time.perf_counter() - start
+        if self._skip_warned.pop(key, None):
+            clog.info("collector_enabled", hint="required permissions are now granted")
         if write:
             self._state.cache.replace(
                 Snapshot(tenant.id, collector_name, time.time(), tuple(samples))
@@ -181,6 +212,35 @@ class Scheduler:
             self._state.health.record_success(tenant.id, collector_name, duration, len(samples))
         clog.info("collector_ok", samples=len(samples), duration_s=round(duration, 3))
         return RunResult(tenant, collector_name, True, duration, samples=samples)
+
+    def _peer_samples(self, tenant_id: str, collector: str) -> tuple[MetricSample, ...]:
+        snap = self._state.cache.get(tenant_id, collector)
+        return snap.samples if snap is not None else ()
+
+    def _skip(
+        self,
+        tenant: TenantConfig,
+        collector: str,
+        missing: tuple[Requirement, ...],
+        start: float,
+        clog: Any,
+        *,
+        write: bool,
+    ) -> RunResult:
+        key = (tenant.id, collector)
+        if self._skip_warned.get(key) != missing:  # one warning per tenant and collector
+            self._skip_warned[key] = missing
+            clog.warning(
+                "collector_skipped",
+                reason="missing_permission",
+                missing=[" or ".join(g) for g in missing],
+                hint=f"grant the application permission(s), then: m365c tenant verify "
+                f"{tenant.customer}",
+            )
+        if write:
+            self._state.cache.drop(*key)  # no stale data from before the permission went
+            self._state.health.record_skipped(tenant.id, collector, missing)
+        return RunResult(tenant, collector, True, time.perf_counter() - start, skipped=missing)
 
     async def _loop(self, key: Key) -> None:
         tenant_id, collector = key
@@ -191,15 +251,20 @@ class Scheduler:
             tenant = self._state.tenants.get(tenant_id)
             if tenant is None:
                 return
+            skipped = False
             try:
-                ok = (await self.run_once(tenant, collector)).ok
+                result = await self.run_once(tenant, collector)
+                ok, skipped = result.ok, bool(result.skipped)
             except asyncio.CancelledError:
                 raise
             except Exception:  # run_once handles collector errors; this is belt and braces
                 log.exception("scheduler_loop_error", tenant=tenant.name, collector=collector)
                 ok = False
             failures = 0 if ok else failures + 1
-            await self._sleep(next_delay(interval, failures))
+            # A skipped collector re-checks the token's roles at least hourly, so newly
+            # granted consent starts it without waiting a full (e.g. 24 h) interval.
+            delay = min(interval, SKIPPED_RECHECK_S) if skipped else next_delay(interval, failures)
+            await self._sleep(delay)
 
     async def stop(self) -> None:
         tasks = list(self._tasks.values())

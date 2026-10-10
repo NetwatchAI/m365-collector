@@ -14,7 +14,7 @@ def normalize_status(status: str) -> str:
 class ServiceHealthCollector(BaseCollector):
     name = "servicehealth"
     default_interval = 300.0
-    required_permissions = ("ServiceHealth.Read.All",)
+    required_permissions = (("ServiceHealth.Read.All",),)
     metric_help: ClassVar[dict[str, str]] = {
         "m365_service_status": "1 for the service's current health status",
     }

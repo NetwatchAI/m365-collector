@@ -11,7 +11,7 @@ from m365c.collectors.base import MetricSample
 from m365c.config import TenantConfig
 from m365c.graph import GraphAuthError, GraphClient
 
-from .conftest import make_ctx
+from .conftest import QUOTA, make_ctx
 
 V1 = "https://graph.microsoft.com/v1.0"
 
@@ -50,7 +50,7 @@ def test_every_collector_declares_contract() -> None:
         assert c.metric_help
         assert all(m.startswith("m365_") for m in c.metric_help)
     assert "Reports.Read.All" in permissions()
-    assert permissions(["license"]) == ["LicenseAssignment.Read.All"]
+    assert permissions(["license"]) == ["LicenseAssignment.Read.All", "Organization.Read.All"]
 
 
 async def test_license(fixture_graph: GraphClient, tenant: TenantConfig) -> None:
@@ -129,6 +129,7 @@ async def test_users_without_signin_activity_falls_back(
         )
 
     route = respx.get(f"{V1}/users").mock(side_effect=handler)
+    respx.get(f"{V1}/subscribedSkus").mock(return_value=httpx.Response(200, json={"value": []}))
     state: dict[str, object] = {}
     collector = all_collectors()["users"]
     s = await collector.collect(make_ctx(respx_graph, tenant, state))
@@ -172,6 +173,7 @@ async def test_users_agent_filter_unsupported_falls_back(
         )
 
     route = respx.get(f"{V1}/users").mock(side_effect=handler)
+    respx.get(f"{V1}/subscribedSkus").mock(return_value=httpx.Response(200, json={"value": []}))
     state: dict[str, object] = {}
     s = await all_collectors()["users"].collect(make_ctx(respx_graph, tenant, state))
     assert [x.labels["upn"] for x in find(s, "m365_user_info")] == ["a@x"]
@@ -213,11 +215,11 @@ async def test_mailtraffic(fixture_graph: GraphClient, tenant: TenantConfig) -> 
     s = await collect("mailtraffic", fixture_graph, tenant)
     alice = "alice@contoso.onmicrosoft.com"
     assert value(s, "m365_reports_concealed", report="mailtraffic") == 0
-    assert value(s, "m365_mail_sent_7d", upn=alice) == 950
-    assert value(s, "m365_mail_received_7d", upn=alice) == 1200
-    assert value(s, "m365_mail_read_7d", upn=alice) == 1100
-    assert value(s, "m365_mail_received_7d", upn="bob@contoso.onmicrosoft.com") == 15
-    assert not find(s, "m365_mail_sent_7d", upn="ghost@contoso.onmicrosoft.com")
+    assert value(s, "m365_mail_sent", upn=alice, period="D7") == 950
+    assert value(s, "m365_mail_received", upn=alice, period="D7") == 1200
+    assert value(s, "m365_mail_read", upn=alice, period="D7") == 1100
+    assert value(s, "m365_mail_received", upn="bob@contoso.onmicrosoft.com") == 15
+    assert not find(s, "m365_mail_sent", upn="ghost@contoso.onmicrosoft.com")
 
 
 @respx.mock
@@ -231,13 +233,14 @@ async def test_concealed_reports_skip_user_series(
     report = respx.get(url__regex=r".*/reports/.*").mock(return_value=httpx.Response(500))
     state: dict[str, object] = {}
     s = await all_collectors()[name].collect(make_ctx(respx_graph, tenant, state))
-    assert s == [MetricSample("m365_reports_concealed", 1.0, {"report": name})]
+    assert s == [MetricSample("m365_reports_concealed", 1.0, {"report": name, "source": "setting"})]
     assert report.call_count == 0
     assert state["concealed_warned"] is True
 
 
-async def test_onedrive(fixture_graph: GraphClient, tenant: TenantConfig) -> None:
-    s = await collect("onedrive", fixture_graph, tenant)
+async def test_onedrive_quota(fixture_graph: GraphClient, tenant: TenantConfig) -> None:
+    ctx = make_ctx(fixture_graph, tenant, options=QUOTA)
+    s = await all_collectors()["onedrive"].collect(ctx)
     alice = "alice@contoso.onmicrosoft.com"
     assert value(s, "m365_onedrive_used_bytes", upn=alice) == 549755813888
     assert value(s, "m365_onedrive_total_bytes", upn=alice) == 1099511627776
@@ -267,7 +270,7 @@ async def test_onedrive_all_denied_fails(respx_graph: GraphClient, tenant: Tenan
         return_value=httpx.Response(403, json={"error": {"code": "accessDenied", "message": "no"}})
     )
     with pytest.raises(GraphAuthError):
-        await all_collectors()["onedrive"].collect(make_ctx(respx_graph, tenant))
+        await all_collectors()["onedrive"].collect(make_ctx(respx_graph, tenant, options=QUOTA))
 
 
 async def test_servicehealth(fixture_graph: GraphClient, tenant: TenantConfig) -> None:

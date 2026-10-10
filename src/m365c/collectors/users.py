@@ -6,9 +6,11 @@ from m365c.collectors.base import (
     BaseCollector,
     CollectorContext,
     MetricSample,
+    Requirement,
     bool_label,
     to_timestamp,
 )
+from m365c.collectors.license import LICENSE_READ
 from m365c.graph import GraphAuthError, GraphError
 
 BASE_SELECT = (
@@ -20,6 +22,8 @@ BASE_SELECT = (
     "assignedLicenses",
     "createdDateTime",
 )
+USER_READ: Requirement = ("User.Read.All",)
+SIGNIN_READ: Requirement = ("AuditLog.Read.All",)
 AGENT_USER_TYPE = "#microsoft.graph.agentUser"
 AGENT_FILTER = "not isof('microsoft.graph.agentUser')"
 # lastSignInDateTime / lastNonInteractiveSignInDateTime record *attempts*, successful or
@@ -65,7 +69,11 @@ async def fetch_users_with_fallback(
 class UsersCollector(BaseCollector):
     name = "users"
     default_interval = 6 * 3600.0
-    required_permissions = ("User.Read.All", "AuditLog.Read.All")
+    required_permissions = (USER_READ,)
+    optional_permissions = (
+        (SIGNIN_READ, "last successful sign-in (signInActivity; also needs Entra ID P1)"),
+        (LICENSE_READ, "SKU names (skuPartNumber) on m365_user_license instead of SKU IDs"),
+    )
     metric_help: ClassVar[dict[str, str]] = {
         "m365_user_info": "User metadata; always 1",
         "m365_user_last_signin_timestamp": (
@@ -75,16 +83,46 @@ class UsersCollector(BaseCollector):
         "m365_users_total": "Number of users by enabled/licensed state",
         "m365_users_disabled_licensed": "Disabled users that still hold licences",
         "m365_tenant_feature": "1 if an optional tenant feature is available to the collector",
+        "m365_user_license": "1 per licence (SKU) assigned to the user",
+        "m365_user_last_activity_timestamp": (
+            "Unix time of the user's last activity: last successful sign-in, or else the "
+            "mailbox report's Last Activity Date"
+        ),
     }
 
-    async def collect(self, ctx: CollectorContext) -> list[MetricSample]:
-        signin_available = True
+    async def _sku_names(self, ctx: CollectorContext) -> dict[str, str]:
+        """skuId -> skuPartNumber, fetched once per run; empty if not permitted."""
+        if not ctx.granted(LICENSE_READ):
+            return {}
         try:
-            users = await fetch_users_with_fallback(ctx, (*BASE_SELECT, "signInActivity"))
+            data = await ctx.graph.get_json("/subscribedSkus", {"$select": "skuId,skuPartNumber"})
+        except GraphError as exc:  # any failure: fall back to sku=sku_id, don't fail the run
+            if not ctx.state.get("sku_warned"):
+                ctx.log.warning(
+                    "sku_names_unavailable",
+                    error=exc.code,
+                    hint="needs Organization.Read.All or LicenseAssignment.Read.All; "
+                    "m365_user_license uses sku=sku_id",
+                )
+                ctx.state["sku_warned"] = True
+            return {}
+        ctx.state.pop("sku_warned", None)
+        return {
+            str(s["skuId"]).lower(): str(s.get("skuPartNumber") or s["skuId"])
+            for s in data.get("value") or []
+            if isinstance(s, dict) and s.get("skuId")
+        }
+
+    async def _fetch(self, ctx: CollectorContext) -> tuple[list[dict[str, Any]], bool]:
+        """Users, and whether signInActivity was available."""
+        if not ctx.granted(SIGNIN_READ):
+            # Not in the token: don't provoke a 403 every run.
+            return await fetch_users_with_fallback(ctx, BASE_SELECT), False
+        try:
+            return await fetch_users_with_fallback(ctx, (*BASE_SELECT, "signInActivity")), True
         except GraphAuthError as exc:
             # signInActivity needs AuditLog.Read.All and Entra ID P1. Retry without it; if
             # this also fails the error is a real permission problem and propagates.
-            signin_available = False
             users = await fetch_users_with_fallback(ctx, BASE_SELECT)
             if not ctx.state.get("signin_warned"):
                 ctx.log.warning(
@@ -93,8 +131,20 @@ class UsersCollector(BaseCollector):
                     hint="needs AuditLog.Read.All consent and Entra ID P1 in the client tenant",
                 )
                 ctx.state["signin_warned"] = True
+            return users, False
+
+    async def collect(self, ctx: CollectorContext) -> list[MetricSample]:
+        users, signin_available = await self._fetch(ctx)
         if signin_available:
             ctx.state.pop("signin_warned", None)
+        sku_names = await self._sku_names(ctx)
+        # Fallback for last activity: the mailbox report's Last Activity Date, from the
+        # mailbox collector's latest snapshot for this tenant (if it has run).
+        mailbox_activity = {
+            s.labels["upn"]: s.value
+            for s in ctx.peer_samples("mailbox")
+            if s.name == "m365_mailbox_last_activity_timestamp" and "upn" in s.labels
+        }
 
         samples: list[MetricSample] = [
             MetricSample(
@@ -109,7 +159,12 @@ class UsersCollector(BaseCollector):
             if not upn:
                 continue
             enabled = bool(user.get("accountEnabled"))
-            licensed = bool(user.get("assignedLicenses"))
+            licenses = [
+                str(lic["skuId"]).lower()
+                for lic in user.get("assignedLicenses") or []
+                if isinstance(lic, dict) and lic.get("skuId")
+            ]
+            licensed = bool(licenses)
             counts[(enabled, licensed)] += 1
             samples.append(
                 MetricSample(
@@ -124,13 +179,26 @@ class UsersCollector(BaseCollector):
                     },
                 )
             )
+            for sku_id in dict.fromkeys(licenses):
+                samples.append(
+                    MetricSample(
+                        "m365_user_license",
+                        1.0,
+                        {"upn": upn, "sku": sku_names.get(sku_id, sku_id), "sku_id": sku_id},
+                    )
+                )
             created = to_timestamp(user.get("createdDateTime"))
             if created is not None:
                 samples.append(MetricSample("m365_user_created_timestamp", created, {"upn": upn}))
-            activity = user.get("signInActivity") or {}
+            activity = (user.get("signInActivity") if signin_available else None) or {}
             last = to_timestamp(activity.get(SIGNIN_FIELD))
             if last is not None:
                 samples.append(MetricSample("m365_user_last_signin_timestamp", last, {"upn": upn}))
+            last_activity = last if last is not None else mailbox_activity.get(upn)
+            if last_activity is not None:
+                samples.append(
+                    MetricSample("m365_user_last_activity_timestamp", last_activity, {"upn": upn})
+                )
 
         for (enabled, licensed), n in counts.items():
             samples.append(
