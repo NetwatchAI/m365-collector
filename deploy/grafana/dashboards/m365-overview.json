@@ -1578,7 +1578,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "((time() - m365_user_created_timestamp{customer=~\"$customer\",tenant=~\"$tenant\"}) / 86400) and on(customer, tenant, upn) m365_user_info{customer=~\"$customer\",tenant=~\"$tenant\",enabled=\"true\",licensed=\"true\"} unless on(customer, tenant, upn) m365_user_last_signin_timestamp{customer=~\"$customer\",tenant=~\"$tenant\"} and on(customer, tenant) (m365_tenant_feature{customer=~\"$customer\",tenant=~\"$tenant\",feature=\"signin_activity\"} == 1)",
+          "expr": "(((time() - m365_user_created_timestamp{customer=~\"$customer\",tenant=~\"$tenant\"}) / 86400) and on(customer, tenant, upn) m365_user_info{customer=~\"$customer\",tenant=~\"$tenant\",enabled=\"true\",licensed=\"true\"} unless on(customer, tenant, upn) m365_user_last_signin_timestamp{customer=~\"$customer\",tenant=~\"$tenant\"} and on(customer, tenant) (m365_tenant_feature{customer=~\"$customer\",tenant=~\"$tenant\",feature=\"signin_activity\"} == 1)) * on(customer, tenant, upn) group_right() m365_user_license{customer=~\"$customer\",tenant=~\"$tenant\"}",
           "refId": "A",
           "legendFormat": "",
           "instant": true,
@@ -1587,6 +1587,37 @@
         }
       ],
       "transformations": [
+        {
+          "id": "groupBy",
+          "options": {
+            "fields": {
+              "customer": {
+                "aggregations": [],
+                "operation": "groupby"
+              },
+              "tenant": {
+                "aggregations": [],
+                "operation": "groupby"
+              },
+              "upn": {
+                "aggregations": [],
+                "operation": "groupby"
+              },
+              "sku": {
+                "aggregations": [
+                  "uniqueValues"
+                ],
+                "operation": "aggregate"
+              },
+              "Value": {
+                "aggregations": [
+                  "max"
+                ],
+                "operation": "aggregate"
+              }
+            }
+          }
+        },
         {
           "id": "organize",
           "options": {
@@ -1597,7 +1628,8 @@
               "instance": true
             },
             "renameByName": {
-              "Value": "account age (days)"
+              "sku (uniqueValues)": "licences",
+              "Value (max)": "account age (days)"
             }
           }
         },

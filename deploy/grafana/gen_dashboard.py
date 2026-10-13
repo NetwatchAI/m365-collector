@@ -567,10 +567,13 @@ table(
     "Licensed users who never signed in (days since account creation)",
     [
         target(
-            f"((time() - m365_user_created_timestamp{{{SEL}}}) / 86400)"
+            f"(((time() - m365_user_created_timestamp{{{SEL}}}) / 86400)"
             f' and on(customer, tenant, upn) m365_user_info{{{SEL},enabled="true",licensed="true"}}'
             f" unless on(customer, tenant, upn) m365_user_last_signin_timestamp{{{SEL}}}"
-            f' and on(customer, tenant) (m365_tenant_feature{{{SEL},feature="signin_activity"}} == 1)',
+            f' and on(customer, tenant) (m365_tenant_feature{{{SEL},feature="signin_activity"}} == 1))'
+            # one row per assigned licence (m365_user_license is 1, so the value stays the age);
+            # groupBy below folds them back into one row per user
+            f" * on(customer, tenant, upn) group_right() m365_user_license{{{SEL}}}",
             instant=True,
             fmt="table",
         )
@@ -579,7 +582,24 @@ table(
     y,
     24,
     8,
-    organize={**hide(), "renameByName": {"Value": "account age (days)"}},
+    extra=[
+        {
+            "id": "groupBy",
+            "options": {
+                "fields": {
+                    "customer": {"aggregations": [], "operation": "groupby"},
+                    "tenant": {"aggregations": [], "operation": "groupby"},
+                    "upn": {"aggregations": [], "operation": "groupby"},
+                    "sku": {"aggregations": ["uniqueValues"], "operation": "aggregate"},
+                    "Value": {"aggregations": ["max"], "operation": "aggregate"},
+                }
+            },
+        }
+    ],
+    organize={
+        **hide(),
+        "renameByName": {"sku (uniqueValues)": "licences", "Value (max)": "account age (days)"},
+    },
     sort={"field": "account age (days)", "desc": True},
 )
 y += 8
