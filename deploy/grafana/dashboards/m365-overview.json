@@ -1274,6 +1274,149 @@
       }
     },
     {
+      "type": "table",
+      "title": "M365 Available License Count",
+      "id": 36,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 47
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(label_replace(m365_license_available{customer=~\"$customer\",tenant=~\"$tenant\",sku_name=\"\"}, \"sku_name\", \"$1\", \"sku\", \"(.*)\") or m365_license_available{customer=~\"$customer\",tenant=~\"$tenant\",sku_name!=\"\"}) and on(customer, tenant, sku) (m365_license_total{customer=~\"$customer\",tenant=~\"$tenant\"} > 0)",
+          "refId": "A",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(label_replace(m365_license_total{customer=~\"$customer\",tenant=~\"$tenant\",sku_name=\"\"}, \"sku_name\", \"$1\", \"sku\", \"(.*)\") or m365_license_total{customer=~\"$customer\",tenant=~\"$tenant\",sku_name!=\"\"}) and on(customer, tenant, sku) (m365_license_total{customer=~\"$customer\",tenant=~\"$tenant\"} > 0)",
+          "refId": "B",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(label_replace(m365_license_consumed{customer=~\"$customer\",tenant=~\"$tenant\",sku_name=\"\"}, \"sku_name\", \"$1\", \"sku\", \"(.*)\") or m365_license_consumed{customer=~\"$customer\",tenant=~\"$tenant\",sku_name!=\"\"}) and on(customer, tenant, sku) (m365_license_total{customer=~\"$customer\",tenant=~\"$tenant\"} > 0)",
+          "refId": "C",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true
+            },
+            "indexByName": {
+              "customer": 0,
+              "tenant": 1,
+              "sku_name": 2,
+              "sku": 3,
+              "Value #A": 4
+            },
+            "renameByName": {
+              "sku_name": "product",
+              "sku": "SKU",
+              "Value #A": "available",
+              "Value #B": "total",
+              "Value #C": "consumed"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "available",
+                "desc": false
+              }
+            ]
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          },
+          "unit": "none",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "green",
+                "value": 6
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "available"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "description": "Available = enabled (prepaid) minus consumed units per tenant and SKU, fewest first; negative means over-assigned. Colours: red ≤ 0, orange 1–5, green > 5. SKUs with no enabled units (free/viral) are hidden."
+    },
+    {
       "type": "row",
       "title": "Storage",
       "id": 16,
@@ -1282,7 +1425,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 47
+        "y": 57
       },
       "panels": []
     },
@@ -1298,7 +1441,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 48
+        "y": 58
       },
       "targets": [
         {
@@ -1364,7 +1507,7 @@
         "h": 10,
         "w": 12,
         "x": 12,
-        "y": 48
+        "y": 58
       },
       "targets": [
         {
@@ -1427,7 +1570,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 58
+        "y": 68
       },
       "panels": []
     },
@@ -1443,7 +1586,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 59
+        "y": 69
       },
       "targets": [
         {
@@ -1501,7 +1644,7 @@
         "h": 10,
         "w": 12,
         "x": 12,
-        "y": 59
+        "y": 69
       },
       "targets": [
         {
@@ -1570,7 +1713,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 69
+        "y": 79
       },
       "targets": [
         {
@@ -1668,7 +1811,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 77
+        "y": 87
       },
       "panels": []
     },
@@ -1684,7 +1827,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 78
+        "y": 88
       },
       "targets": [
         {
@@ -1741,7 +1884,7 @@
         "h": 10,
         "w": 12,
         "x": 12,
-        "y": 78
+        "y": 88
       },
       "targets": [
         {
@@ -1795,7 +1938,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 88
+        "y": 98
       },
       "panels": []
     },
@@ -1811,7 +1954,7 @@
         "h": 10,
         "w": 8,
         "x": 0,
-        "y": 89
+        "y": 99
       },
       "targets": [
         {
@@ -1906,7 +2049,7 @@
         "h": 10,
         "w": 8,
         "x": 8,
-        "y": 89
+        "y": 99
       },
       "targets": [
         {
@@ -1953,7 +2096,7 @@
         "h": 10,
         "w": 8,
         "x": 16,
-        "y": 89
+        "y": 99
       },
       "targets": [
         {
@@ -2019,7 +2162,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 99
+        "y": 109
       },
       "panels": []
     },
@@ -2035,7 +2178,7 @@
         "h": 10,
         "w": 14,
         "x": 0,
-        "y": 100
+        "y": 110
       },
       "targets": [
         {
@@ -2238,7 +2381,7 @@
         "h": 10,
         "w": 10,
         "x": 14,
-        "y": 100
+        "y": 110
       },
       "targets": [
         {
@@ -2285,7 +2428,7 @@
         "h": 8,
         "w": 14,
         "x": 0,
-        "y": 110
+        "y": 120
       },
       "targets": [
         {
@@ -2345,7 +2488,7 @@
         "h": 8,
         "w": 10,
         "x": 14,
-        "y": 110
+        "y": 120
       },
       "targets": [
         {
@@ -2448,7 +2591,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 118
+        "y": 128
       },
       "targets": [
         {

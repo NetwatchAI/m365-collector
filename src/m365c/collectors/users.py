@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import json
-from functools import cache
-from importlib.resources import files
 from typing import Any, ClassVar
 
 from m365c.collectors.base import (
@@ -13,7 +10,7 @@ from m365c.collectors.base import (
     bool_label,
     to_timestamp,
 )
-from m365c.collectors.license import LICENSE_READ
+from m365c.collectors.license import LICENSE_READ, product_names
 from m365c.graph import GraphAuthError, GraphError
 
 BASE_SELECT = (
@@ -33,16 +30,6 @@ AGENT_FILTER = "not isof('microsoft.graph.agentUser')"
 # not, so a dormant account under password spray would look active. Only the successful
 # timestamp says the account was really used.
 SIGNIN_FIELD = "lastSuccessfulSignInDateTime"
-
-
-@cache
-def product_names() -> dict[str, str]:
-    """skuId -> product display name, from Microsoft's licensing CSV (bundled; regenerate
-    with scripts/update_sku_names.py)."""
-    data: dict[str, str] = json.loads(
-        files("m365c").joinpath("sku_names.json").read_text(encoding="utf-8")
-    )
-    return data
 
 
 def is_agent_user(user: dict[str, Any]) -> bool:

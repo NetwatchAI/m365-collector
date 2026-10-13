@@ -73,6 +73,8 @@ def table(
     overrides=None,
     extra=None,
     description=None,
+    defaults=None,
+    panel_id=None,
 ):
     transformations = [{"id": "merge", "options": {}}] if len(targets) > 1 else []
     transformations += extra or []
@@ -80,13 +82,13 @@ def table(
         transformations.append({"id": "organize", "options": organize})
     if sort:
         transformations.append({"id": "sortBy", "options": {"sort": [sort]}})
-    defaults = {"custom": {"align": "auto", "filterable": True}}
+    defaults = {"custom": {"align": "auto", "filterable": True}, **(defaults or {})}
     if unit:
         defaults["unit"] = unit
     panel = {
         "type": "table",
         "title": title,
-        "id": nid(),
+        "id": panel_id or nid(),
         "datasource": DS,
         "gridPos": {"h": h, "w": w, "x": x, "y": y},
         "targets": targets,
@@ -97,6 +99,7 @@ def table(
     if description:
         panel["description"] = description
     panels.append(panel)
+    return panel
 
 
 PCT_STEPS = {
@@ -481,11 +484,16 @@ stat(
 )
 y += 10
 
+
+def lic(metric, match=""):
+    return f"m365_license_{metric}{{{SEL}{match}}}"
+
+
 row("Licences", y)
 y += 1
 bargauge(
     "Licence utilisation per SKU",
-    f"m365_license_consumed{{{SEL}}} / (m365_license_total{{{SEL}}} > 0)",
+    f"{lic('consumed')} / ({lic('total')} > 0)",
     "{{tenant}} · {{sku}}",
     0,
     y,
@@ -495,9 +503,9 @@ bargauge(
 table(
     "Licences",
     [
-        target(f"m365_license_total{{{SEL}}}", instant=True, fmt="table", ref="A"),
-        target(f"m365_license_consumed{{{SEL}}}", instant=True, fmt="table", ref="B"),
-        target(f"m365_license_available{{{SEL}}}", instant=True, fmt="table", ref="C"),
+        target(lic("total"), instant=True, fmt="table", ref="A"),
+        target(lic("consumed"), instant=True, fmt="table", ref="B"),
+        target(lic("available"), instant=True, fmt="table", ref="C"),
     ],
     12,
     y,
@@ -508,6 +516,66 @@ table(
         "renameByName": {"Value #A": "total", "Value #B": "consumed", "Value #C": "available"},
     },
     sort={"field": "available", "desc": False},
+)
+y += 10
+
+
+# The Zabbix "M365 Available License Count" widget (available.licenses[] = total - used per
+# discovered SKU). Same queries as "Licences", plus: series from collectors without the
+# sku_name label (before the product-name map) show sku instead, and SKUs without prepaid
+# units (free/viral, e.g. FLOW_FREE) are hidden. Zabbix listed those too.
+def lic_paid(metric):
+    unnamed, named = lic(metric, ',sku_name=""'), lic(metric, ',sku_name!=""')
+    either = f'(label_replace({unnamed}, "sku_name", "$1", "sku", "(.*)") or {named})'
+    return f"{either} and on(customer, tenant, sku) ({lic('total')} > 0)"
+
+
+available_panel = table(
+    "M365 Available License Count",
+    [
+        target(lic_paid("available"), instant=True, fmt="table", ref="A"),
+        target(lic_paid("total"), instant=True, fmt="table", ref="B"),
+        target(lic_paid("consumed"), instant=True, fmt="table", ref="C"),
+    ],
+    0,
+    y,
+    24,
+    10,
+    organize={
+        **hide(),
+        "indexByName": {"customer": 0, "tenant": 1, "sku_name": 2, "sku": 3, "Value #A": 4},
+        "renameByName": {
+            "sku_name": "product",
+            "sku": "SKU",
+            "Value #A": "available",
+            "Value #B": "total",
+            "Value #C": "consumed",
+        },
+    },
+    sort={"field": "available", "desc": False},
+    defaults={
+        "unit": "none",
+        "decimals": 0,
+        "thresholds": {
+            "mode": "absolute",
+            "steps": [
+                {"color": "red", "value": None},
+                {"color": "orange", "value": 1},
+                {"color": "green", "value": 6},
+            ],
+        },
+    },
+    overrides=[
+        {
+            "matcher": {"id": "byName", "options": "available"},
+            "properties": [{"id": "custom.cellOptions", "value": {"type": "color-background"}}],
+        }
+    ],
+    description="Available = enabled (prepaid) minus consumed units per tenant and SKU, fewest "
+    "first; negative means over-assigned. Colours: red ≤ 0, orange 1–5, green > 5. SKUs with "
+    "no enabled units (free/viral) are hidden.",
+    # keeps the IDs of the panels below stable; set after them
+    panel_id=-1,
 )
 y += 10
 
@@ -867,6 +935,8 @@ panels.append(
         },
     }
 )
+
+available_panel["id"] = nid()
 
 
 def var(name, query, label):

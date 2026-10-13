@@ -98,8 +98,8 @@ async def test_serve_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
                 break
             await asyncio.sleep(0.05)
     assert (
-        'm365_license_total{customer="contoso",sku="SPB",tenant="contoso.onmicrosoft.com"} 25.0'
-        in body
+        'm365_license_total{customer="contoso",sku="SPB",'
+        'sku_name="Microsoft 365 Business Premium",tenant="contoso.onmicrosoft.com"} 25.0' in body
     )
     assert 'sku="OLD"' not in body
     assert "m365_service_status" in body

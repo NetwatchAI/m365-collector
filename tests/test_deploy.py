@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -41,11 +42,7 @@ def test_rules_cover_spec_and_have_summaries() -> None:
 
 
 def test_rules_reference_only_known_metrics() -> None:
-    known = set(BUILTIN_HELP) | {"m365_graph_requests_total", "m365_graph_throttled_total"}
-    for c in all_collectors().values():
-        known |= set(c.metric_help)
-    import re
-
+    known = _known_metrics()
     for rule in _rules():
         for name in re.findall(r"\bm365_[a-z0-9_]+", str(rule["expr"])):
             assert name in known, f"{rule['alert']} uses unknown metric {name}"
@@ -147,6 +144,48 @@ def test_dashboard_has_template_parity_row() -> None:
         assert panel["type"] == "table"
         exprs = " ".join(t["expr"] for t in panel["targets"])
         assert needle in exprs and "$customer" in exprs and "$tenant" in exprs
+
+
+def _known_metrics() -> set[str]:
+    known = set(BUILTIN_HELP) | {"m365_graph_requests_total", "m365_graph_throttled_total"}
+    for c in all_collectors().values():
+        known |= set(c.metric_help)
+    return known
+
+
+def test_dashboard_has_available_license_count() -> None:
+    """The Zabbix "M365 Available License Count" widget: per tenant and SKU, fewest first."""
+    dash = json.loads(
+        (DEPLOY / "grafana" / "dashboards" / "m365-overview.json").read_text(encoding="utf-8")
+    )
+    panels = dash["panels"]
+    assert len({p["id"] for p in panels}) == len(panels)
+    titles = [p["title"] for p in panels]
+    idx = titles.index("M365 Available License Count")
+    assert titles.index("Licences") < idx < titles.index("Storage")  # in the Licences row
+    panel = panels[idx]
+    exprs = [t["expr"] for t in panel["targets"]]
+    assert "m365_license_available" in exprs[0]
+    for expr in exprs:
+        assert "$customer" in expr and "$tenant" in expr
+        assert "(m365_license_total" in expr and "> 0)" in expr  # free SKUs hidden
+        assert "sku_name" in expr
+        for name in re.findall(r"m365_[a-z0-9_]+", expr):
+            assert name in _known_metrics(), name
+    defaults = panel["fieldConfig"]["defaults"]
+    assert defaults["unit"] == "none" and defaults["decimals"] == 0
+    steps = [(s["color"], s["value"]) for s in defaults["thresholds"]["steps"]]
+    assert steps == [("red", None), ("orange", 1), ("green", 6)]
+    sort = next(t for t in panel["transformations"] if t["id"] == "sortBy")
+    assert sort["options"]["sort"] == [{"field": "available", "desc": False}]
+    # Laid out below the other Licences panels, without overlapping anything.
+    boxes = [p["gridPos"] for p in panels]
+    for i, a in enumerate(boxes):
+        for b in boxes[i + 1 :]:
+            assert not (
+                a["x"] < b["x"] + b["w"] and b["x"] < a["x"] + a["w"]
+                and a["y"] < b["y"] + b["h"] and b["y"] < a["y"] + a["h"]
+            ), (a, b)  # fmt: skip
 
 
 def test_compose_has_no_inline_secrets() -> None:

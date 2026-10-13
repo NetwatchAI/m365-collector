@@ -61,7 +61,48 @@ async def test_license(fixture_graph: GraphClient, tenant: TenantConfig) -> None
     assert value(s, "m365_license_available", sku="EXCHANGESTANDARD") == 0
     assert value(s, "m365_license_suspended", sku="EXCHANGESTANDARD") == 2
     assert value(s, "m365_license_warning", sku="EXCHANGESTANDARD") == 1
-    assert {k for x in s for k in x.labels} == {"sku"}
+    assert {k for x in s for k in x.labels} == {"sku", "sku_name"}
+    # Product display name from the bundled map, keyed by skuId.
+    assert {x.labels["sku_name"] for x in find(s, "m365_license_total")} == {
+        "Microsoft 365 Business Premium",
+        "Exchange Online (Plan 1)",
+    }
+
+
+@respx.mock
+async def test_license_free_and_over_assigned_skus(
+    respx_graph: GraphClient, tenant: TenantConfig
+) -> None:
+    respx.get(f"{V1}/subscribedSkus").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "value": [
+                    {  # free/viral SKU: no prepaid units, still consumed
+                        "skuId": "f30db892-07e9-47e9-837c-80727f46fd3d",
+                        "skuPartNumber": "FLOW_FREE",
+                        "consumedUnits": 3,
+                        "prepaidUnits": {"enabled": 0, "suspended": 0, "warning": 0},
+                    },
+                    {  # over-assigned, and unknown to the product-name map
+                        "skuId": "11111111-2222-3333-4444-555555555555",
+                        "skuPartNumber": "CUSTOM_SKU",
+                        "consumedUnits": 12,
+                        "prepaidUnits": {"enabled": 10},
+                    },
+                ]
+            },
+        )
+    )
+    s = await collect("license", respx_graph, tenant)
+    free = {"sku": "FLOW_FREE", "sku_name": "Microsoft Power Automate Free"}
+    assert value(s, "m365_license_total", **free) == 0
+    assert value(s, "m365_license_available", **free) == -3
+    over = {"sku": "CUSTOM_SKU", "sku_name": "CUSTOM_SKU"}  # falls back to sku
+    assert value(s, "m365_license_total", **over) == 10
+    assert value(s, "m365_license_consumed", **over) == 12
+    assert value(s, "m365_license_available", **over) == -2
+    assert value(s, "m365_license_suspended", **over) == 0
 
 
 async def test_users(fixture_graph: GraphClient, tenant: TenantConfig) -> None:

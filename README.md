@@ -60,7 +60,7 @@ Key properties:
 
 | name | default interval | Graph source | required permission (any one per line) | metrics (all also `customer`, `tenant`) |
 |---|---|---|---|---|
-| `license` | 1h | `GET /subscribedSkus` | `Organization.Read.All` or `LicenseAssignment.Read.All` | `m365_license_total{sku}`, `_consumed`, `_available`, `_suspended`, `_warning` |
+| `license` | 1h | `GET /subscribedSkus` | `Organization.Read.All` or `LicenseAssignment.Read.All` | `m365_license_total{sku,sku_name}`, `_consumed`, `_available`, `_suspended`, `_warning` |
 | `users` | 6h | `GET /users?$select=…,assignedLicenses,createdDateTime[,signInActivity]` (paged) + one `GET /subscribedSkus` | `User.Read.All` (optional: `AuditLog.Read.All` for sign-in; `Organization.Read.All` or `LicenseAssignment.Read.All` for SKU names) | `m365_user_info{upn,display_name,department,enabled,licensed}`, `m365_user_license{upn,sku,sku_id,sku_name}`, `m365_user_last_signin_timestamp{upn}` (last *successful* sign-in), `m365_user_last_activity_timestamp{upn}`, `m365_user_created_timestamp{upn}`, `m365_users_total{enabled,licensed}`, `m365_users_disabled_licensed`, `m365_tenant_feature{feature="signin_activity"}` |
 | `mailbox` | 12h | `GET /reports/getMailboxUsageDetail(period=…)` (CSV) | `Reports.Read.All` (optional: `ReportSettings.Read.All`) | `m365_mailbox_info{upn,display_name,has_archive}`, `m365_mailbox_used_bytes{upn}`, `_quota_bytes` (Prohibit Send), `_items`, `_last_activity_timestamp`, `_has_archive`, `m365_mailbox_deleted`, `m365_reports_concealed{report,source}` |
 | `onedrive` | 6h | `source: report` (default): `GET /reports/getOneDriveUsageAccountDetail(period=…)` (CSV); `source: quota`: `GET /users/{id}/drive?$select=quota` per licensed, enabled user | report: `Reports.Read.All`; quota: `User.Read.All` and `Files.Read.All` | `m365_onedrive_info{upn,display_name}` (report), `m365_onedrive_used_bytes{upn}`, `_total_bytes`, `_file_count` (report), `_last_activity_timestamp` (report), `_deleted_bytes` (quota), `m365_reports_concealed{report,source}` |
@@ -117,6 +117,8 @@ Health semantics:
 
 Collector notes:
 
+- **license**: `sku` is the `skuPartNumber`; `sku_name` is the product display name from the
+  same bundled map as `m365_user_license` (see *users*), falling back to `sku`.
 - **users**: `m365_user_license` comes from each user's `assignedLicenses`; `skuId` is mapped
   to `skuPartNumber` with **one** `subscribedSkus` call per run (never `licenseDetails` per
   user). Without `Organization.Read.All`/`LicenseAssignment.Read.All`, or if that call fails,
@@ -702,7 +704,12 @@ docker compose -f deploy/docker-compose.yml up -d --build
 - Prometheus `127.0.0.1:9090` (scrapes every 60s, rules in `deploy/prometheus/rules/m365.yml`),
   Alertmanager `127.0.0.1:9093`, Grafana `127.0.0.1:3000` (dashboard *Microsoft 365 overview*,
   `customer` and `tenant` variables, with a **Template parity** row). Put a reverse proxy
-  with TLS in front for remote access.
+  with TLS in front for remote access. The **Licences** row has the Zabbix widget **M365
+  Available License Count**: a table with one row per tenant and SKU (product name, SKU part
+  number, available, total, consumed), fewest available first. Available is coloured red at
+  ≤ 0 (exhausted or over-assigned), orange at 1–5 and green above 5. SKUs with no enabled
+  units (free/viral SKUs such as `FLOW_FREE`) are hidden there, unlike in Zabbix; the
+  *Licences* table next to it still lists them.
 - Alloy ships container logs labelled `logs.netwatch/ship=true` to Loki, with `level`,
   `customer` and `collector` extracted as labels. Alloy talks to a `docker-socket-proxy` that
   only allows `GET /containers/*` and `GET /networks`, not the Docker socket. The proxy sits

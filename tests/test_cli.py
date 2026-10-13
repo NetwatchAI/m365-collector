@@ -61,7 +61,8 @@ def test_run_dry_run_against_fixtures_json(cfg_dir: Path) -> None:
     }  # fmt: skip
     assert all(r["ok"] for r in results)
     lic = next(r for r in results if r["collector"] == "license")
-    assert {"name": "m365_license_total", "value": 25.0, "labels": {"sku": "SPB"}} in lic["samples"]
+    labels = {"sku": "SPB", "sku_name": "Microsoft 365 Business Premium"}
+    assert {"name": "m365_license_total", "value": 25.0, "labels": labels} in lic["samples"]
 
 
 def test_run_table_single_collector(cfg_dir: Path) -> None:
