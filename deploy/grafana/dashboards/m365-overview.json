@@ -1603,7 +1603,7 @@
                 "aggregations": [],
                 "operation": "groupby"
               },
-              "sku": {
+              "sku_name": {
                 "aggregations": [
                   "uniqueValues"
                 ],
@@ -1628,7 +1628,7 @@
               "instance": true
             },
             "renameByName": {
-              "sku (uniqueValues)": "licences",
+              "sku_name (uniqueValues)": "license type",
               "Value (max)": "account age (days)"
             }
           }

@@ -48,7 +48,7 @@ All new metrics carry `customer` and `tenant` labels as well; they are left out 
 | `m365.disabled.users.lld` (`{#USERNAME}`, `{#FORMATTEDNAME}`) | Discovery → host prototype per user | `m365_user_info{upn,enabled="false",licensed="true"}` | ⚠️ one series per user instead of one host |
 | `get.raw.data.m365.disabled` (per-host: same query + `licenseDetails` per user) | Script | as above; licences from `assignedLicenses` | ⚠️ no `licenseDetails` call per user (one `subscribedSkus` call per run maps `skuId` → `skuPartNumber`) |
 | `Disabled.department` | Dependent | `m365_user_info{department}` | ✅ |
-| `Disabled.licenses` (comma-joined `skuPartNumber`) | Dependent | `m365_user_license{upn,sku,sku_id}` = 1 per licence | ✅ falls back to `sku=sku_id` if the SKU lookup is unavailable |
+| `Disabled.licenses` (comma-joined `skuPartNumber`) | Dependent | `m365_user_license{upn,sku,sku_id,sku_name}` = 1 per licence | ✅ falls back to `sku=sku_id` if the SKU lookup is unavailable |
 | `Disabled.lastactivity` (`signInActivity.lastSignInDateTime`) | Dependent | `m365_user_last_signin_timestamp{upn}` (needs `AuditLog.Read.All` + Entra ID P1) and `m365_user_last_activity_timestamp{upn}` | ⚠️ uses `lastSuccessfulSignInDateTime` (the template's field also counts failed attempts). Without sign-in data, `m365_user_last_activity_timestamp` falls back to the mailbox report's Last Activity Date |
 | `isLicenseReconciliationNeeded`, `userId` (in raw JSON, never extracted to an item) | — | not exported | ⚠️ never used by an item or widget |
 | `m365_users_disabled_licensed` (count; no template item) | — | extra | ✅ |

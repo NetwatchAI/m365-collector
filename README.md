@@ -61,7 +61,7 @@ Key properties:
 | name | default interval | Graph source | required permission (any one per line) | metrics (all also `customer`, `tenant`) |
 |---|---|---|---|---|
 | `license` | 1h | `GET /subscribedSkus` | `Organization.Read.All` or `LicenseAssignment.Read.All` | `m365_license_total{sku}`, `_consumed`, `_available`, `_suspended`, `_warning` |
-| `users` | 6h | `GET /users?$select=…,assignedLicenses,createdDateTime[,signInActivity]` (paged) + one `GET /subscribedSkus` | `User.Read.All` (optional: `AuditLog.Read.All` for sign-in; `Organization.Read.All` or `LicenseAssignment.Read.All` for SKU names) | `m365_user_info{upn,display_name,department,enabled,licensed}`, `m365_user_license{upn,sku,sku_id}`, `m365_user_last_signin_timestamp{upn}` (last *successful* sign-in), `m365_user_last_activity_timestamp{upn}`, `m365_user_created_timestamp{upn}`, `m365_users_total{enabled,licensed}`, `m365_users_disabled_licensed`, `m365_tenant_feature{feature="signin_activity"}` |
+| `users` | 6h | `GET /users?$select=…,assignedLicenses,createdDateTime[,signInActivity]` (paged) + one `GET /subscribedSkus` | `User.Read.All` (optional: `AuditLog.Read.All` for sign-in; `Organization.Read.All` or `LicenseAssignment.Read.All` for SKU names) | `m365_user_info{upn,display_name,department,enabled,licensed}`, `m365_user_license{upn,sku,sku_id,sku_name}`, `m365_user_last_signin_timestamp{upn}` (last *successful* sign-in), `m365_user_last_activity_timestamp{upn}`, `m365_user_created_timestamp{upn}`, `m365_users_total{enabled,licensed}`, `m365_users_disabled_licensed`, `m365_tenant_feature{feature="signin_activity"}` |
 | `mailbox` | 12h | `GET /reports/getMailboxUsageDetail(period=…)` (CSV) | `Reports.Read.All` (optional: `ReportSettings.Read.All`) | `m365_mailbox_info{upn,display_name,has_archive}`, `m365_mailbox_used_bytes{upn}`, `_quota_bytes` (Prohibit Send), `_items`, `_last_activity_timestamp`, `_has_archive`, `m365_mailbox_deleted`, `m365_reports_concealed{report,source}` |
 | `onedrive` | 6h | `source: report` (default): `GET /reports/getOneDriveUsageAccountDetail(period=…)` (CSV); `source: quota`: `GET /users/{id}/drive?$select=quota` per licensed, enabled user | report: `Reports.Read.All`; quota: `User.Read.All` and `Files.Read.All` | `m365_onedrive_info{upn,display_name}` (report), `m365_onedrive_used_bytes{upn}`, `_total_bytes`, `_file_count` (report), `_last_activity_timestamp` (report), `_deleted_bytes` (quota), `m365_reports_concealed{report,source}` |
 | `mailtraffic` | 12h | `GET /reports/getEmailActivityUserDetail(period=…)` (CSV) | `Reports.Read.All` (optional: `ReportSettings.Read.All`) | `m365_mail_sent{upn,period}`, `m365_mail_received{upn,period}`, `m365_mail_read{upn,period}`, `m365_reports_concealed{report,source}` |
@@ -120,7 +120,10 @@ Collector notes:
 - **users**: `m365_user_license` comes from each user's `assignedLicenses`; `skuId` is mapped
   to `skuPartNumber` with **one** `subscribedSkus` call per run (never `licenseDetails` per
   user). Without `Organization.Read.All`/`LicenseAssignment.Read.All`, or if that call fails,
-  `sku` falls back to the SKU ID. `signInActivity` needs `AuditLog.Read.All` *and* Entra ID
+  `sku` falls back to the SKU ID. `sku_name` is the product display name (e.g. *Microsoft 365
+  Business Premium*) from a bundled copy of Microsoft's licensing CSV, keyed by SKU ID, so it
+  needs no extra permission; SKUs missing from it fall back to `sku`. Refresh the copy with
+  `scripts/update_sku_names.py`. `signInActivity` needs `AuditLog.Read.All` *and* Entra ID
   P1. If the token lacks `AuditLog.Read.All` it is not requested at all; if Graph refuses it
   (403, no P1) the collector retries without it and warns once. Either way
   `m365_tenant_feature{feature="signin_activity"}` is 0. Only

@@ -590,7 +590,7 @@ table(
                     "customer": {"aggregations": [], "operation": "groupby"},
                     "tenant": {"aggregations": [], "operation": "groupby"},
                     "upn": {"aggregations": [], "operation": "groupby"},
-                    "sku": {"aggregations": ["uniqueValues"], "operation": "aggregate"},
+                    "sku_name": {"aggregations": ["uniqueValues"], "operation": "aggregate"},
                     "Value": {"aggregations": ["max"], "operation": "aggregate"},
                 }
             },
@@ -598,7 +598,10 @@ table(
     ],
     organize={
         **hide(),
-        "renameByName": {"sku (uniqueValues)": "licences", "Value (max)": "account age (days)"},
+        "renameByName": {
+            "sku_name (uniqueValues)": "license type",
+            "Value (max)": "account age (days)",
+        },
     },
     sort={"field": "account age (days)", "desc": True},
 )

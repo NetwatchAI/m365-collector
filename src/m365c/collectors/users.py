@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from functools import cache
+from importlib.resources import files
 from typing import Any, ClassVar
 
 from m365c.collectors.base import (
@@ -30,6 +33,16 @@ AGENT_FILTER = "not isof('microsoft.graph.agentUser')"
 # not, so a dormant account under password spray would look active. Only the successful
 # timestamp says the account was really used.
 SIGNIN_FIELD = "lastSuccessfulSignInDateTime"
+
+
+@cache
+def product_names() -> dict[str, str]:
+    """skuId -> product display name, from Microsoft's licensing CSV (bundled; regenerate
+    with scripts/update_sku_names.py)."""
+    data: dict[str, str] = json.loads(
+        files("m365c").joinpath("sku_names.json").read_text(encoding="utf-8")
+    )
+    return data
 
 
 def is_agent_user(user: dict[str, Any]) -> bool:
@@ -83,7 +96,9 @@ class UsersCollector(BaseCollector):
         "m365_users_total": "Number of users by enabled/licensed state",
         "m365_users_disabled_licensed": "Disabled users that still hold licences",
         "m365_tenant_feature": "1 if an optional tenant feature is available to the collector",
-        "m365_user_license": "1 per licence (SKU) assigned to the user",
+        "m365_user_license": (
+            "1 per licence (SKU) assigned to the user; sku_name is the product display name"
+        ),
         "m365_user_last_activity_timestamp": (
             "Unix time of the user's last activity: last successful sign-in, or else the "
             "mailbox report's Last Activity Date"
@@ -180,11 +195,17 @@ class UsersCollector(BaseCollector):
                 )
             )
             for sku_id in dict.fromkeys(licenses):
+                sku = sku_names.get(sku_id, sku_id)
                 samples.append(
                     MetricSample(
                         "m365_user_license",
                         1.0,
-                        {"upn": upn, "sku": sku_names.get(sku_id, sku_id), "sku_id": sku_id},
+                        {
+                            "upn": upn,
+                            "sku": sku,
+                            "sku_id": sku_id,
+                            "sku_name": product_names().get(sku_id, sku),
+                        },
                     )
                 )
             created = to_timestamp(user.get("createdDateTime"))

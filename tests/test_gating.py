@@ -244,6 +244,11 @@ async def test_users_without_auditlog_role_never_requests_signin(
     # Unknown SKU (not in subscribedSkus): sku falls back to the ID.
     lic = find(s, "m365_user_license", sku_id="11111111-2222-3333-4444-555555555555")
     assert lic[0].labels["sku"] == "11111111-2222-3333-4444-555555555555"
+    # Product display name from the bundled map; unknown to it: falls back to sku.
+    assert find(s, "m365_user_license", sku="SPB")[0].labels["sku_name"] == (
+        "Microsoft 365 Business Premium"
+    )
+    assert lic[0].labels["sku_name"] == "11111111-2222-3333-4444-555555555555"
     # No sign-in data: last activity comes from the mailbox report.
     assert value(s, "m365_user_last_activity_timestamp", upn="alice@x") == 1_790_000_000.0
     assert not find(s, "m365_user_last_activity_timestamp", upn="bob@x")
@@ -264,6 +269,8 @@ async def test_users_without_license_role_uses_sku_ids(
     assert skus.call_count == 0
     sku_id = "cbdc14ab-d96c-4c30-b9f4-6ada7cdc1d46"
     assert value(s, "m365_user_license", upn="a@x", sku=sku_id, sku_id=sku_id) == 1
+    # The display name needs no Graph call: the bundled map is keyed by skuId.
+    assert value(s, "m365_user_license", upn="a@x", sku_name="Microsoft 365 Business Premium") == 1
 
 
 @respx.mock
