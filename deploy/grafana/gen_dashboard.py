@@ -572,8 +572,11 @@ table(
             f" unless on(customer, tenant, upn) m365_user_last_signin_timestamp{{{SEL}}}"
             f' and on(customer, tenant) (m365_tenant_feature{{{SEL},feature="signin_activity"}} == 1))'
             # one row per assigned licence (m365_user_license is 1, so the value stays the age);
-            # groupBy below folds them back into one row per user
-            f" * on(customer, tenant, upn) group_right() m365_user_license{{{SEL}}}",
+            # groupBy below folds them back into one row per user. Series from collectors
+            # without the sku_name label (before the product-name map) show sku instead.
+            f" * on(customer, tenant, upn) group_right()"
+            f' (label_replace(m365_user_license{{{SEL},sku_name=""}}, "sku_name", "$1", "sku", "(.*)")'
+            f' or m365_user_license{{{SEL},sku_name!=""}})',
             instant=True,
             fmt="table",
         )

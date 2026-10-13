@@ -1578,7 +1578,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(((time() - m365_user_created_timestamp{customer=~\"$customer\",tenant=~\"$tenant\"}) / 86400) and on(customer, tenant, upn) m365_user_info{customer=~\"$customer\",tenant=~\"$tenant\",enabled=\"true\",licensed=\"true\"} unless on(customer, tenant, upn) m365_user_last_signin_timestamp{customer=~\"$customer\",tenant=~\"$tenant\"} and on(customer, tenant) (m365_tenant_feature{customer=~\"$customer\",tenant=~\"$tenant\",feature=\"signin_activity\"} == 1)) * on(customer, tenant, upn) group_right() m365_user_license{customer=~\"$customer\",tenant=~\"$tenant\"}",
+          "expr": "(((time() - m365_user_created_timestamp{customer=~\"$customer\",tenant=~\"$tenant\"}) / 86400) and on(customer, tenant, upn) m365_user_info{customer=~\"$customer\",tenant=~\"$tenant\",enabled=\"true\",licensed=\"true\"} unless on(customer, tenant, upn) m365_user_last_signin_timestamp{customer=~\"$customer\",tenant=~\"$tenant\"} and on(customer, tenant) (m365_tenant_feature{customer=~\"$customer\",tenant=~\"$tenant\",feature=\"signin_activity\"} == 1)) * on(customer, tenant, upn) group_right() (label_replace(m365_user_license{customer=~\"$customer\",tenant=~\"$tenant\",sku_name=\"\"}, \"sku_name\", \"$1\", \"sku\", \"(.*)\") or m365_user_license{customer=~\"$customer\",tenant=~\"$tenant\",sku_name!=\"\"})",
           "refId": "A",
           "legendFormat": "",
           "instant": true,
