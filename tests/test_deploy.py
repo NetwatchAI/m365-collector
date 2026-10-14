@@ -164,20 +164,19 @@ def test_dashboard_has_available_license_count() -> None:
     idx = titles.index("M365 Available License Count")
     assert titles.index("Licences") < idx < titles.index("Storage")  # in the Licences row
     panel = panels[idx]
-    exprs = [t["expr"] for t in panel["targets"]]
-    assert "m365_license_available" in exprs[0]
-    for expr in exprs:
-        assert "$customer" in expr and "$tenant" in expr
-        assert "(m365_license_total" in expr and "> 0)" in expr  # free SKUs hidden
-        assert "sku_name" in expr
-        for name in re.findall(r"m365_[a-z0-9_]+", expr):
-            assert name in _known_metrics(), name
+    assert panel["type"] == "stat"  # one card per tenant and SKU, like the Zabbix widget
+    (target,) = panel["targets"]
+    expr = target["expr"]
+    assert expr.startswith("sort(")  # fewest available first
+    assert "m365_license_available" in expr and "$customer" in expr and "$tenant" in expr
+    assert "(m365_license_total" in expr and "> 0)" in expr  # free SKUs hidden
+    assert target["legendFormat"] == "{{tenant}} · {{sku_name}}"
+    for name in re.findall(r"m365_[a-z0-9_]+", expr):
+        assert name in _known_metrics(), name
     defaults = panel["fieldConfig"]["defaults"]
     assert defaults["unit"] == "none" and defaults["decimals"] == 0
     steps = [(s["color"], s["value"]) for s in defaults["thresholds"]["steps"]]
     assert steps == [("red", None), ("orange", 1), ("green", 6)]
-    sort = next(t for t in panel["transformations"] if t["id"] == "sortBy")
-    assert sort["options"]["sort"] == [{"field": "available", "desc": False}]
     # Laid out below the other Licences panels, without overlapping anything.
     boxes = [p["gridPos"] for p in panels]
     for i, a in enumerate(boxes):

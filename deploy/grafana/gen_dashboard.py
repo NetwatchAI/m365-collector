@@ -73,8 +73,6 @@ def table(
     overrides=None,
     extra=None,
     description=None,
-    defaults=None,
-    panel_id=None,
 ):
     transformations = [{"id": "merge", "options": {}}] if len(targets) > 1 else []
     transformations += extra or []
@@ -82,13 +80,13 @@ def table(
         transformations.append({"id": "organize", "options": organize})
     if sort:
         transformations.append({"id": "sortBy", "options": {"sort": [sort]}})
-    defaults = {"custom": {"align": "auto", "filterable": True}, **(defaults or {})}
+    defaults = {"custom": {"align": "auto", "filterable": True}}
     if unit:
         defaults["unit"] = unit
     panel = {
         "type": "table",
         "title": title,
-        "id": panel_id or nid(),
+        "id": nid(),
         "datasource": DS,
         "gridPos": {"h": h, "w": w, "x": x, "y": y},
         "targets": targets,
@@ -99,7 +97,6 @@ def table(
     if description:
         panel["description"] = description
     panels.append(panel)
-    return panel
 
 
 PCT_STEPS = {
@@ -530,53 +527,46 @@ def lic_paid(metric):
     return f"{either} and on(customer, tenant, sku) ({lic('total')} > 0)"
 
 
-available_panel = table(
-    "M365 Available License Count",
-    [
-        target(lic_paid("available"), instant=True, fmt="table", ref="A"),
-        target(lic_paid("total"), instant=True, fmt="table", ref="B"),
-        target(lic_paid("consumed"), instant=True, fmt="table", ref="C"),
+# One card per tenant and SKU, like the Zabbix widget; sort() orders the cards fewest first
+# (Grafana keeps the order of an instant query). Total and consumed: the Licences table.
+available_panel = {
+    "type": "stat",
+    "title": "M365 Available License Count",
+    "id": 0,  # set after the panels below, so their IDs stay stable
+    "datasource": DS,
+    "gridPos": {"h": 10, "w": 24, "x": 0, "y": y},
+    "targets": [
+        target(f"sort({lic_paid('available')})", "{{tenant}} · {{sku_name}}", instant=True)
     ],
-    0,
-    y,
-    24,
-    10,
-    organize={
-        **hide(),
-        "indexByName": {"customer": 0, "tenant": 1, "sku_name": 2, "sku": 3, "Value #A": 4},
-        "renameByName": {
-            "sku_name": "product",
-            "sku": "SKU",
-            "Value #A": "available",
-            "Value #B": "total",
-            "Value #C": "consumed",
-        },
+    "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "values": False, "fields": ""},
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": True,
     },
-    sort={"field": "available", "desc": False},
-    defaults={
-        "unit": "none",
-        "decimals": 0,
-        "thresholds": {
-            "mode": "absolute",
-            "steps": [
-                {"color": "red", "value": None},
-                {"color": "orange", "value": 1},
-                {"color": "green", "value": 6},
-            ],
+    "fieldConfig": {
+        "defaults": {
+            "unit": "none",
+            "decimals": 0,
+            "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                    {"color": "red", "value": None},
+                    {"color": "orange", "value": 1},
+                    {"color": "green", "value": 6},
+                ],
+            },
         },
+        "overrides": [],
     },
-    overrides=[
-        {
-            "matcher": {"id": "byName", "options": "available"},
-            "properties": [{"id": "custom.cellOptions", "value": {"type": "color-background"}}],
-        }
-    ],
-    description="Available = enabled (prepaid) minus consumed units per tenant and SKU, fewest "
-    "first; negative means over-assigned. Colours: red ≤ 0, orange 1–5, green > 5. SKUs with "
-    "no enabled units (free/viral) are hidden.",
-    # keeps the IDs of the panels below stable; set after them
-    panel_id=-1,
-)
+    "description": "Available = enabled (prepaid) minus consumed units, one card per tenant and "
+    "SKU, fewest first; negative means over-assigned. Colours: red ≤ 0, orange 1–5, green > 5. "
+    "SKUs with no enabled units (free/viral) are hidden. Total and consumed: the Licences table.",
+}
+panels.append(available_panel)
 y += 10
 
 row("Storage", y)

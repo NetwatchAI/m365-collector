@@ -1274,7 +1274,7 @@
       }
     },
     {
-      "type": "table",
+      "type": "stat",
       "title": "M365 Available License Count",
       "id": 36,
       "datasource": {
@@ -1293,90 +1293,31 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(label_replace(m365_license_available{customer=~\"$customer\",tenant=~\"$tenant\",sku_name=\"\"}, \"sku_name\", \"$1\", \"sku\", \"(.*)\") or m365_license_available{customer=~\"$customer\",tenant=~\"$tenant\",sku_name!=\"\"}) and on(customer, tenant, sku) (m365_license_total{customer=~\"$customer\",tenant=~\"$tenant\"} > 0)",
+          "expr": "sort((label_replace(m365_license_available{customer=~\"$customer\",tenant=~\"$tenant\",sku_name=\"\"}, \"sku_name\", \"$1\", \"sku\", \"(.*)\") or m365_license_available{customer=~\"$customer\",tenant=~\"$tenant\",sku_name!=\"\"}) and on(customer, tenant, sku) (m365_license_total{customer=~\"$customer\",tenant=~\"$tenant\"} > 0))",
           "refId": "A",
-          "legendFormat": "",
+          "legendFormat": "{{tenant}} · {{sku_name}}",
           "instant": true,
           "range": false,
-          "format": "table"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "(label_replace(m365_license_total{customer=~\"$customer\",tenant=~\"$tenant\",sku_name=\"\"}, \"sku_name\", \"$1\", \"sku\", \"(.*)\") or m365_license_total{customer=~\"$customer\",tenant=~\"$tenant\",sku_name!=\"\"}) and on(customer, tenant, sku) (m365_license_total{customer=~\"$customer\",tenant=~\"$tenant\"} > 0)",
-          "refId": "B",
-          "legendFormat": "",
-          "instant": true,
-          "range": false,
-          "format": "table"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "(label_replace(m365_license_consumed{customer=~\"$customer\",tenant=~\"$tenant\",sku_name=\"\"}, \"sku_name\", \"$1\", \"sku\", \"(.*)\") or m365_license_consumed{customer=~\"$customer\",tenant=~\"$tenant\",sku_name!=\"\"}) and on(customer, tenant, sku) (m365_license_total{customer=~\"$customer\",tenant=~\"$tenant\"} > 0)",
-          "refId": "C",
-          "legendFormat": "",
-          "instant": true,
-          "range": false,
-          "format": "table"
-        }
-      ],
-      "transformations": [
-        {
-          "id": "merge",
-          "options": {}
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "__name__": true,
-              "job": true,
-              "instance": true
-            },
-            "indexByName": {
-              "customer": 0,
-              "tenant": 1,
-              "sku_name": 2,
-              "sku": 3,
-              "Value #A": 4
-            },
-            "renameByName": {
-              "sku_name": "product",
-              "sku": "SKU",
-              "Value #A": "available",
-              "Value #B": "total",
-              "Value #C": "consumed"
-            }
-          }
-        },
-        {
-          "id": "sortBy",
-          "options": {
-            "sort": [
-              {
-                "field": "available",
-                "desc": false
-              }
-            ]
-          }
+          "format": "time_series"
         }
       ],
       "options": {
-        "showHeader": true,
-        "cellHeight": "sm"
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false,
+          "fields": ""
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true
       },
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "align": "auto",
-            "filterable": true
-          },
           "unit": "none",
           "decimals": 0,
           "thresholds": {
@@ -1397,24 +1338,9 @@
             ]
           }
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "available"
-            },
-            "properties": [
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-background"
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
-      "description": "Available = enabled (prepaid) minus consumed units per tenant and SKU, fewest first; negative means over-assigned. Colours: red ≤ 0, orange 1–5, green > 5. SKUs with no enabled units (free/viral) are hidden."
+      "description": "Available = enabled (prepaid) minus consumed units, one card per tenant and SKU, fewest first; negative means over-assigned. Colours: red ≤ 0, orange 1–5, green > 5. SKUs with no enabled units (free/viral) are hidden. Total and consumed: the Licences table."
     },
     {
       "type": "row",

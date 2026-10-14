@@ -705,11 +705,11 @@ docker compose -f deploy/docker-compose.yml up -d --build
   Alertmanager `127.0.0.1:9093`, Grafana `127.0.0.1:3000` (dashboard *Microsoft 365 overview*,
   `customer` and `tenant` variables, with a **Template parity** row). Put a reverse proxy
   with TLS in front for remote access. The **Licences** row has the Zabbix widget **M365
-  Available License Count**: a table with one row per tenant and SKU (product name, SKU part
-  number, available, total, consumed), fewest available first. Available is coloured red at
-  ≤ 0 (exhausted or over-assigned), orange at 1–5 and green above 5. SKUs with no enabled
-  units (free/viral SKUs such as `FLOW_FREE`) are hidden there, unlike in Zabbix; the
-  *Licences* table next to it still lists them.
+  Available License Count**: one card per tenant and SKU (named by product, or the SKU part
+  number), fewest available first. Cards are red at ≤ 0 (exhausted or over-assigned),
+  orange at 1–5 and green above 5. SKUs with no enabled units (free/viral SKUs such as
+  `FLOW_FREE`) are hidden there, unlike in Zabbix; the *Licences* table, which also shows
+  total and consumed, still lists them.
 - Alloy ships container logs labelled `logs.netwatch/ship=true` to Loki, with `level`,
   `customer` and `collector` extracted as labels. Alloy talks to a `docker-socket-proxy` that
   only allows `GET /containers/*` and `GET /networks`, not the Docker socket. The proxy sits
