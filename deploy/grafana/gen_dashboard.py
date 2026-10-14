@@ -899,7 +899,8 @@ table(
             ],
         }
     ],
-    description="Roles m365c uses, from the tenant's current token (decoded locally).",
+    description="Roles m365c uses, and broader roles that also satisfy them (e.g. "
+    "Directory.Read.All), from the tenant's current token (decoded locally).",
 )
 y += 8
 LOKI = {"type": "loki", "uid": "loki"}

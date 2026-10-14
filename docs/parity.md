@@ -34,7 +34,7 @@ All new metrics carry `customer` and `tenant` labels as well; they are left out 
 
 | Template item | Kind | m365c metric | Status |
 |---|---|---|---|
-| `get.raw.data` (Ms Graph Usage, `GET /v1.0/subscribedSkus`) | Script | `license` collector, same endpoint | ✅ works with `Organization.Read.All` or `LicenseAssignment.Read.All` |
+| `get.raw.data` (Ms Graph Usage, `GET /v1.0/subscribedSkus`) | Script | `license` collector, same endpoint | ✅ works with `Organization.Read.All` or `LicenseAssignment.Read.All`, or a broader role Graph accepts (`Directory.Read.All`, …) |
 | `discover.SKU` (LLD `{#SKUPARTID}`, `{#SKUPARTNUMBER}`) | Discovery | `sku` label (`skuPartNumber`) | ✅ |
 | `sku.total.licenses[{#SKUPARTID}]` (`prepaidUnits.enabled`) | Dependent prototype | `m365_license_total{sku}` | ✅ |
 | `sku.used.licenses[{#SKUPARTID}]` (`consumedUnits`) | Dependent prototype | `m365_license_consumed{sku}` | ✅ |

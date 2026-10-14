@@ -30,8 +30,10 @@ from m365c.collectors import (
     TenantOptions,
     all_collectors,
     format_requirement,
+    known_roles,
     permissions,
 )
+from m365c.collectors.base import satisfied
 from m365c.collectors.onedrive import effective_source
 from m365c.collectors.reports import REPORT_SETTINGS
 from m365c.collectors.users import SIGNIN_READ
@@ -389,7 +391,7 @@ async def _verify_tenant(
     if roles is None:
         checks.append(Check("permissions", SKIP, "token has no roles claim: collectors not gated"))
     else:
-        relevant = sorted(roles & set(permissions()))
+        relevant = sorted(roles & set(known_roles()))
         checks.append(Check("permissions", OK, "granted: " + (", ".join(relevant) or "none")))
 
     options = TenantOptions(report_period(settings, tenant), onedrive_source(settings, tenant))
@@ -409,7 +411,7 @@ async def _verify_tenant(
         extras = [
             f"{format_requirement(g)} would add {what}"
             for g, what in collector.optional_permissions
-            if roles is not None and not roles & set(g)
+            if roles is not None and not satisfied(roles, g)
         ]
         if extras:
             detail += "; optional: " + "; ".join(extras)
@@ -418,7 +420,7 @@ async def _verify_tenant(
     tg = graph.for_tenant(tenant)
     if not REPORT_COLLECTORS & running:
         checks.append(Check("reports", SKIP, "no report collectors running"))
-    elif roles is not None and not roles & set(REPORT_SETTINGS):
+    elif roles is not None and not satisfied(roles, REPORT_SETTINGS):
         checks.append(
             Check(
                 "reports",
@@ -451,7 +453,7 @@ async def _verify_tenant(
 
     if "users" not in running:
         checks.append(Check("signin", SKIP, "users collector not running"))
-    elif roles is not None and not roles & set(SIGNIN_READ):
+    elif roles is not None and not satisfied(roles, SIGNIN_READ):
         checks.append(
             Check(
                 "signin",

@@ -358,7 +358,12 @@ keep their own app registration and client secret (see the next section but one)
    ```
 
    Anything less is fine: collectors without their permissions are skipped. No directory role
-   is needed.
+   is needed. Broader roles that Graph also accepts for the same calls count too, so apps
+   that already hold them (often the legacy Zabbix apps) need no new consent:
+   `Directory.Read.All`, `Directory.ReadWrite.All`, `Organization.ReadWrite.All` and
+   `LicenseAssignment.ReadWrite.All` for licences; `Directory.Read.All`,
+   `Directory.ReadWrite.All` and `User.ReadWrite.All` for users. `m365c permissions` lists
+   only the least-privileged roles.
 4. Put the **Application (client) ID** in `settings.yaml` → `app.client_id`.
 
 ## Client onboarding

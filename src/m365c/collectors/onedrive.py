@@ -31,6 +31,7 @@ from m365c.collectors.base import (
     MetricSample,
     Requirement,
     TenantOptions,
+    satisfied,
     to_float,
     to_timestamp,
 )
@@ -60,7 +61,7 @@ _REPORT_NUMERIC = (
 def effective_source(configured: str, roles: frozenset[str] | None) -> str:
     if configured != "auto":
         return configured
-    if roles is not None and all(roles & set(group) for group in QUOTA_PERMISSIONS):
+    if roles is not None and all(satisfied(roles, group) for group in QUOTA_PERMISSIONS):
         return "quota"
     return "report"
 

@@ -9,6 +9,7 @@ from m365c.collectors.base import (
     MetricSample,
     Requirement,
     TenantOptions,
+    accepted_roles,
 )
 from m365c.collectors.license import LICENSE_READ, LicenseCollector
 from m365c.collectors.mailbox import MailboxCollector
@@ -28,6 +29,7 @@ __all__ = [
     "TenantOptions",
     "all_collectors",
     "format_requirement",
+    "known_roles",
     "permissions",
 ]
 
@@ -66,6 +68,12 @@ def permissions(names: list[str] | None = None) -> list[str]:
     optional, every alternative of an any-of group."""
     selected = [c for c in _CLASSES if names is None or c.name in names]
     return sorted({p for c in selected for group in _groups(c) for p in group})
+
+
+def known_roles() -> list[str]:
+    """permissions() plus the broader roles that also satisfy them (BROADER_ROLES)."""
+    selected = [g for c in _CLASSES for g in _groups(c)]
+    return sorted({r for g in selected for r in accepted_roles(g)})
 
 
 def format_requirement(group: Requirement) -> str:

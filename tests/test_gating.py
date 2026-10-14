@@ -12,8 +12,15 @@ from structlog.testing import capture_logs
 
 from m365c.auth import StaticTokenProvider
 from m365c.cache import SnapshotCache
-from m365c.collectors import PARITY_COLLECTORS, PARITY_PERMISSIONS, all_collectors
-from m365c.collectors.base import MetricSample, TenantOptions
+from m365c.collectors import (
+    PARITY_COLLECTORS,
+    PARITY_PERMISSIONS,
+    all_collectors,
+    known_roles,
+    permissions,
+)
+from m365c.collectors.base import MetricSample, TenantOptions, satisfied
+from m365c.collectors.license import LICENSE_READ
 from m365c.collectors.onedrive import effective_source
 from m365c.config import HttpConfig, Settings, TenantConfig
 from m365c.fixtures import fake_jwt, fixture_transport
@@ -61,6 +68,31 @@ def test_parity_set_runs_exactly_the_parity_collectors() -> None:
     # Organization.Read.All may be replaced by LicenseAssignment.Read.All.
     alt = (granted - {"Organization.Read.All"}) | {"LicenseAssignment.Read.All"}
     assert not all_collectors()["license"].missing_permissions(TenantOptions(), alt)
+
+
+@pytest.mark.parametrize(
+    "broader",
+    ["Directory.Read.All", "Directory.ReadWrite.All", "Organization.ReadWrite.All",
+     "LicenseAssignment.ReadWrite.All"],
+)  # fmt: skip
+def test_broader_roles_satisfy_license_read(broader: str) -> None:
+    """Graph serves subscribedSkus to these roles too (legacy Zabbix apps often hold only
+    Directory.Read.All), but they are never recommended."""
+    assert all_collectors()["license"].missing_permissions(TenantOptions(), roles(broader)) == ()
+    assert broader not in permissions()
+    assert broader in known_roles()
+
+
+def test_directory_read_all_runs_license_and_users() -> None:
+    granted = roles("Directory.Read.All", "Reports.Read.All")
+    running = {
+        name
+        for name, c in all_collectors().items()
+        if not c.missing_permissions(TenantOptions(), granted)
+    }
+    assert running == {"license", "users", "mailbox", "mailtraffic", "onedrive"}
+    assert effective_source("auto", granted) == "report"  # quota still needs Files.Read.All
+    assert satisfied(granted, LICENSE_READ)  # users collector maps SKU IDs to part numbers
 
 
 @pytest.mark.parametrize(

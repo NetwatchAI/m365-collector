@@ -38,6 +38,31 @@ class MetricSample:
 Requirement = tuple[str, ...]
 
 
+# Broader Graph roles that Graph also accepts for the calls m365c makes with a role. They
+# satisfy a requirement but are never recommended: `m365c permissions` lists only the least
+# privileged roles. Legacy (Zabbix) app registrations often hold only Directory.Read.All.
+BROADER_ROLES: dict[str, tuple[str, ...]] = {
+    # GET /subscribedSkus (LICENSE_READ is "Organization.Read.All or LicenseAssignment.Read.All")
+    "LicenseAssignment.Read.All": (
+        "LicenseAssignment.ReadWrite.All",
+        "Organization.ReadWrite.All",
+        "Directory.Read.All",
+        "Directory.ReadWrite.All",
+    ),
+    # GET /users
+    "User.Read.All": ("User.ReadWrite.All", "Directory.Read.All", "Directory.ReadWrite.All"),
+}
+
+
+def accepted_roles(requirement: Requirement) -> set[str]:
+    """The requirement's roles plus the broader roles that also satisfy it."""
+    return {r for role in requirement for r in (role, *BROADER_ROLES.get(role, ()))}
+
+
+def satisfied(roles: frozenset[str], requirement: Requirement) -> bool:
+    return bool(roles & accepted_roles(requirement))
+
+
 @dataclass(frozen=True)
 class TenantOptions:
     """Per-tenant collector options, resolved from settings and the tenant's overrides."""
@@ -65,7 +90,7 @@ class CollectorContext:
 
     def granted(self, requirement: Requirement) -> bool:
         """True if the token holds one of the roles, or the roles are unknown."""
-        return self.roles is None or bool(self.roles & set(requirement))
+        return self.roles is None or satisfied(self.roles, requirement)
 
 
 class BaseCollector(abc.ABC):
@@ -89,7 +114,7 @@ class BaseCollector(abc.ABC):
         """Unsatisfied requirement groups; empty when the roles are unknown."""
         if roles is None:
             return ()
-        return tuple(g for g in self.requirements(options, roles) if not roles & set(g))
+        return tuple(g for g in self.requirements(options, roles) if not satisfied(roles, g))
 
     @abc.abstractmethod
     async def collect(self, ctx: CollectorContext) -> list[MetricSample]: ...

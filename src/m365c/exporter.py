@@ -14,7 +14,7 @@ from prometheus_client.metrics_core import Metric
 from prometheus_client.registry import Collector
 
 from m365c import __version__
-from m365c.collectors import PARITY_COLLECTORS, permissions
+from m365c.collectors import PARITY_COLLECTORS, known_roles
 from m365c.health import FailureKind
 from m365c.state import AppState
 
@@ -149,7 +149,7 @@ class M365Exporter(Collector):
                     1.0,
                 )
 
-        known_permissions = permissions()
+        known_permissions = known_roles()
         tenant_certs = state.tenant_certificates()
         names = list(state.collectors)
         for tenant in state.active_tenants():
