@@ -528,7 +528,8 @@ def lic_paid(metric):
 
 
 # One card per tenant and SKU, like the Zabbix widget; sort() orders the cards fewest first
-# (Grafana keeps the order of an instant query). Total and consumed: the Licences table.
+# (Grafana keeps the order of an instant query). SKUs with exactly 0 available are left out;
+# over-assigned (negative) ones stay. Total and consumed: the Licences table.
 available_panel = {
     "type": "stat",
     "title": "M365 Available License Count",
@@ -536,7 +537,7 @@ available_panel = {
     "datasource": DS,
     "gridPos": {"h": 10, "w": 24, "x": 0, "y": y},
     "targets": [
-        target(f"sort({lic_paid('available')})", "{{tenant}} · {{sku_name}}", instant=True)
+        target(f"sort(({lic_paid('available')}) != 0)", "{{tenant}} · {{sku_name}}", instant=True)
     ],
     "options": {
         "reduceOptions": {"calcs": ["lastNotNull"], "values": False, "fields": ""},
@@ -546,6 +547,7 @@ available_panel = {
         "justifyMode": "center",
         "orientation": "auto",
         "wideLayout": True,
+        "text": {"titleSize": 18, "valueSize": 48},
     },
     "fieldConfig": {
         "defaults": {
@@ -564,7 +566,8 @@ available_panel = {
     },
     "description": "Available = enabled (prepaid) minus consumed units, one card per tenant and "
     "SKU, fewest first; negative means over-assigned. Colours: red ≤ 0, orange 1–5, green > 5. "
-    "SKUs with no enabled units (free/viral) are hidden. Total and consumed: the Licences table.",
+    "Hidden: SKUs with exactly 0 available, and SKUs with no enabled units (free/viral). "
+    "Total and consumed: the Licences table.",
 }
 panels.append(available_panel)
 y += 10

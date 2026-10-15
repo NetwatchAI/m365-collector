@@ -1293,7 +1293,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sort((label_replace(m365_license_available{customer=~\"$customer\",tenant=~\"$tenant\",sku_name=\"\"}, \"sku_name\", \"$1\", \"sku\", \"(.*)\") or m365_license_available{customer=~\"$customer\",tenant=~\"$tenant\",sku_name!=\"\"}) and on(customer, tenant, sku) (m365_license_total{customer=~\"$customer\",tenant=~\"$tenant\"} > 0))",
+          "expr": "sort(((label_replace(m365_license_available{customer=~\"$customer\",tenant=~\"$tenant\",sku_name=\"\"}, \"sku_name\", \"$1\", \"sku\", \"(.*)\") or m365_license_available{customer=~\"$customer\",tenant=~\"$tenant\",sku_name!=\"\"}) and on(customer, tenant, sku) (m365_license_total{customer=~\"$customer\",tenant=~\"$tenant\"} > 0)) != 0)",
           "refId": "A",
           "legendFormat": "{{tenant}} · {{sku_name}}",
           "instant": true,
@@ -1314,7 +1314,11 @@
         "textMode": "value_and_name",
         "justifyMode": "center",
         "orientation": "auto",
-        "wideLayout": true
+        "wideLayout": true,
+        "text": {
+          "titleSize": 18,
+          "valueSize": 48
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -1340,7 +1344,7 @@
         },
         "overrides": []
       },
-      "description": "Available = enabled (prepaid) minus consumed units, one card per tenant and SKU, fewest first; negative means over-assigned. Colours: red ≤ 0, orange 1–5, green > 5. SKUs with no enabled units (free/viral) are hidden. Total and consumed: the Licences table."
+      "description": "Available = enabled (prepaid) minus consumed units, one card per tenant and SKU, fewest first; negative means over-assigned. Colours: red ≤ 0, orange 1–5, green > 5. Hidden: SKUs with exactly 0 available, and SKUs with no enabled units (free/viral). Total and consumed: the Licences table."
     },
     {
       "type": "row",

@@ -711,10 +711,10 @@ docker compose -f deploy/docker-compose.yml up -d --build
   `customer` and `tenant` variables, with a **Template parity** row). Put a reverse proxy
   with TLS in front for remote access. The **Licences** row has the Zabbix widget **M365
   Available License Count**: one card per tenant and SKU (named by product, or the SKU part
-  number), fewest available first. Cards are red at ≤ 0 (exhausted or over-assigned),
-  orange at 1–5 and green above 5. SKUs with no enabled units (free/viral SKUs such as
-  `FLOW_FREE`) are hidden there, unlike in Zabbix; the *Licences* table, which also shows
-  total and consumed, still lists them.
+  number), fewest available first. Cards are red when over-assigned (< 0), orange at 1–5
+  and green above 5. Unlike in Zabbix, SKUs with exactly 0 available and SKUs with no
+  enabled units (free/viral SKUs such as `FLOW_FREE`) are hidden there; the *Licences*
+  table, which also shows total and consumed, still lists them.
 - Alloy ships container logs labelled `logs.netwatch/ship=true` to Loki, with `level`,
   `customer` and `collector` extracted as labels. Alloy talks to a `docker-socket-proxy` that
   only allows `GET /containers/*` and `GET /networks`, not the Docker socket. The proxy sits
