@@ -171,7 +171,7 @@ def test_dashboard_has_available_license_count() -> None:
     assert "m365_license_available" in expr and "$customer" in expr and "$tenant" in expr
     assert "(m365_license_total" in expr and "> 0)" in expr  # free SKUs hidden
     assert expr.endswith(") != 0)")  # SKUs with 0 available hidden, negatives kept
-    assert panel["options"]["text"] == {"titleSize": 18, "valueSize": 48}
+    assert "text" not in panel["options"]  # auto-sized: fixed sizes overflowed the cards
     assert target["legendFormat"] == "{{tenant}} · {{sku_name}}"
     for name in re.findall(r"m365_[a-z0-9_]+", expr):
         assert name in _known_metrics(), name

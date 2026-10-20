@@ -535,7 +535,9 @@ available_panel = {
     "title": "M365 Available License Count",
     "id": 0,  # set after the panels below, so their IDs stay stable
     "datasource": DS,
-    "gridPos": {"h": 10, "w": 24, "x": 0, "y": y},
+    # Tall, so the auto grid gets large cards: Grafana sizes the text to fit each card (fixed
+    # sizes overflowed and overlapped once the cards wrapped into several rows).
+    "gridPos": {"h": 16, "w": 24, "x": 0, "y": y},
     "targets": [
         target(f"sort(({lic_paid('available')}) != 0)", "{{tenant}} · {{sku_name}}", instant=True)
     ],
@@ -547,7 +549,8 @@ available_panel = {
         "justifyMode": "center",
         "orientation": "auto",
         "wideLayout": True,
-        "text": {"titleSize": 18, "valueSize": 48},
+        "minVizWidth": 150,
+        "minVizHeight": 100,
     },
     "fieldConfig": {
         "defaults": {
@@ -570,7 +573,7 @@ available_panel = {
     "Total and consumed: the Licences table.",
 }
 panels.append(available_panel)
-y += 10
+y += 16
 
 row("Storage", y)
 y += 1
